@@ -181,9 +181,9 @@ out:
 /* ── path resolution ─────────────────────────────────────────────── */
 
 /*
- * Resolve @name to an executable path.  Behaviour follows POSIX:
+ * Resolve @name to an executable path.
  *   - contains '/' → treat as relative/absolute path directly
- *   - bare name    → search $PATH only (never implicit CWD)
+ *   - bare name    → search $PATH, then fall back to CWD
  *
  * Returns @resolved on success, NULL on failure.
  */
@@ -201,27 +201,35 @@ static char *find_in_path(const char *name, char *resolved, size_t size)
 		return access(resolved, X_OK) == 0 ? resolved : NULL;
 	}
 
-	/* bare name → search PATH only */
+	/* bare name → search PATH first */
 	const char *path_env = getenv("PATH");
-	if (!path_env)
-		return NULL;
-
-	char *dup = strdup(path_env);
-	if (!dup)
-		return NULL;
-
-	char *saveptr;
-	for (char *dir = strtok_r(dup, ":", &saveptr);
-	     dir;
-	     dir = strtok_r(NULL, ":", &saveptr)) {
-		snprintf(resolved, size, "%s/%s", dir, name);
-		if (access(resolved, X_OK) == 0) {
+	if (path_env) {
+		char *dup = strdup(path_env);
+		if (dup) {
+			char *saveptr;
+			for (char *dir = strtok_r(dup, ":", &saveptr);
+			     dir;
+			     dir = strtok_r(NULL, ":", &saveptr)) {
+				snprintf(resolved, size, "%s/%s", dir, name);
+				if (access(resolved, X_OK) == 0) {
+					free(dup);
+					return resolved;
+				}
+			}
 			free(dup);
-			return resolved;
 		}
 	}
 
-	free(dup);
+	/* fall back to CWD — convenient for local binaries */
+	{
+		char cwd[PATH_MAX];
+		if (getcwd(cwd, sizeof(cwd))) {
+			snprintf(resolved, size, "%s/%s", cwd, name);
+			if (access(resolved, X_OK) == 0)
+				return resolved;
+		}
+	}
+
 	return NULL;
 }
 

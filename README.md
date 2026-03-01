@@ -146,12 +146,12 @@ ovgl uses `pread()` to inspect an ELF binary **without** loading the entire file
 
 ### "Binary not found"
 
-ovgl searches `$PATH` only (it does **not** search the current directory implicitly).
-Always use an explicit path:
+ovgl searches `$PATH` first, then falls back to the current directory:
 
 ```bash
-ovgl ./program          # relative
-ovgl /full/path/program # absolute
+ovgl program            # searches PATH, then CWD
+ovgl ./program          # relative path (direct)
+ovgl /full/path/program # absolute path (direct)
 ```
 
 ### Child processes crash or hang
