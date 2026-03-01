@@ -26,9 +26,19 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "bionilux_elf.h"
+
 /* ── version ─────────────────────────────────────────────────────── */
 
+/*
+ * Allow the build system to override the version string at compile
+ * time via -DBIONILUX_VERSION_OVERRIDE="\"x.y.z\"".
+ */
+#ifdef BIONILUX_VERSION_OVERRIDE
+#define BIONILUX_VERSION BIONILUX_VERSION_OVERRIDE
+#else
 #define BIONILUX_VERSION "0.2.0"
+#endif
 
 /* ── paths ───────────────────────────────────────────────────────── */
 
@@ -50,6 +60,11 @@
 #define C_BLUE   "\033[0;34m"
 #define C_RESET  "\033[0m"
 
+/* compile-time prefix match for environment variables */
+#define ENVPREFIX(var, lit)	(strncmp((var), (lit), sizeof(lit) - 1) == 0)
+
+#define ARRAY_SIZE(a)	(sizeof(a) / sizeof((a)[0]))
+
 /* ── logging helpers ─────────────────────────────────────────────── */
 
 #define msg_info(...) \
@@ -70,8 +85,8 @@
 #ifdef EMBED_PRELOAD
 #include "preload_data.h"
 #else
-static const unsigned char preload_so_data[] = {0};
-static const unsigned int  preload_so_size   = 0;
+static const unsigned char preload_so_data[] __attribute__((unused)) = {0};
+static const unsigned int  preload_so_size   __attribute__((unused)) = 0;
 #endif
 
 /* ── architecture / interpreter enums ────────────────────────────── */
@@ -95,7 +110,7 @@ typedef enum {
 typedef struct {
 	elf_arch_t    arch;
 	interp_type_t interp;
-	char          interp_path[256];
+	char          interp_path[PATH_MAX];
 } binary_info_t;
 
 /* ── ELF analysis ────────────────────────────────────────────────── */
@@ -110,12 +125,12 @@ static binary_info_t analyze_binary(const char *path)
 	Elf64_Ehdr ehdr;
 	int fd;
 
-	fd = open(path, O_RDONLY);
+	fd = open(path, O_RDONLY | O_CLOEXEC);
 	if (fd < 0)
 		return info;
 
 	/* ── read ELF header ──────────────────────────────────────── */
-	if (pread(fd, &ehdr, sizeof(ehdr), 0) != sizeof(ehdr)) {
+	if (elf_pread(fd, &ehdr, sizeof(ehdr), 0) != (ssize_t)sizeof(ehdr)) {
 		info.arch = ARCH_NOT_ELF;
 		goto out;
 	}
@@ -146,7 +161,8 @@ static binary_info_t analyze_binary(const char *path)
 		Elf64_Phdr phdr;
 		off_t off = (off_t)(ehdr.e_phoff + (Elf64_Off)i * ehdr.e_phentsize);
 
-		if (pread(fd, &phdr, sizeof(phdr), off) != sizeof(phdr))
+		if (elf_pread(fd, &phdr, sizeof(phdr), off) !=
+		    (ssize_t)sizeof(phdr))
 			break;
 
 		if (phdr.p_type != PT_INTERP)
@@ -155,8 +171,8 @@ static binary_info_t analyze_binary(const char *path)
 		if (phdr.p_filesz == 0 || phdr.p_filesz >= sizeof(info.interp_path))
 			break;
 
-		if (pread(fd, info.interp_path, phdr.p_filesz,
-			   (off_t)phdr.p_offset) != (ssize_t)phdr.p_filesz)
+		if (elf_pread(fd, info.interp_path, phdr.p_filesz,
+			      (off_t)phdr.p_offset) != (ssize_t)phdr.p_filesz)
 			break;
 
 		info.interp_path[phdr.p_filesz] = '\0';
@@ -335,6 +351,8 @@ static char *extract_preload(char *buf, size_t bufsz)
 		while (remaining > 0) {
 			written = write(fd, p, remaining);
 			if (written < 0) {
+				if (errno == EINTR)
+					continue;
 				close(fd);
 				unlink(buf);
 				return NULL;
@@ -371,19 +389,25 @@ static inline char *xstrdup(const char *s)
 }
 
 /*
- * Helper: snprintf into a freshly allocated string.
+ * Helper: format into a freshly allocated string.
+ * Uses proper asprintf(3) — no truncation, no fixed-size buffer.
  */
 __attribute__((format(printf, 1, 2)))
 static char *xasprintf(const char *fmt, ...)
 {
-	char buf[PATH_MAX + 128];
+	char *p = NULL;
 	va_list ap;
+	int ret;
 
 	va_start(ap, fmt);
-	vsnprintf(buf, sizeof(buf), fmt, ap);
+	ret = vasprintf(&p, fmt, ap);
 	va_end(ap);
 
-	return xstrdup(buf);
+	if (ret < 0) {
+		msg_warn("vasprintf failed (out of memory)");
+		return NULL;
+	}
+	return p;
 }
 
 static void free_env(char **env)
@@ -422,16 +446,23 @@ static char **build_environment(const char *preload_path, int for_box64,
 
 	/* copy existing, filtering vars we'll override */
 	for (size_t i = 0; i < envc; i++) {
-		if (strncmp(environ[i], "LD_PRELOAD=", 11) == 0)        continue;
-		if (strncmp(environ[i], "BIONILUX_GLIBC_LIB=", 16) == 0)   continue;
-		if (strncmp(environ[i], "BIONILUX_GLIBC_LOADER=", 18) == 0) continue;
-		if (strncmp(environ[i], "BIONILUX_ORIG_EXE=", 14) == 0)     continue;
-		if (strncmp(environ[i], "BOX64_LD_PRELOAD=", 17) == 0)  continue;
-		if (strncmp(environ[i], "BOX64_PATH=", 11) == 0)        continue;
+		if (ENVPREFIX(environ[i], "LD_PRELOAD="))        continue;
+		if (ENVPREFIX(environ[i], "BIONILUX_GLIBC_LIB="))   continue;
+		if (ENVPREFIX(environ[i], "BIONILUX_GLIBC_LOADER=")) continue;
+		if (ENVPREFIX(environ[i], "BIONILUX_ORIG_EXE="))     continue;
+		if (ENVPREFIX(environ[i], "BOX64_LD_PRELOAD="))  continue;
+		if (ENVPREFIX(environ[i], "BOX64_PATH="))        continue;
+
+		/*
+		 * Strip glibc-specific LD variables that could
+		 * interfere with bionic or the child process.
+		 */
+		if (ENVPREFIX(environ[i], "LD_AUDIT="))   continue;
+		if (ENVPREFIX(environ[i], "LD_DEBUG="))   continue;
 
 		/* keep user's BOX64_LD_LIBRARY_PATH only in box64 mode */
 		if (!for_box64 &&
-		    strncmp(environ[i], "BOX64_LD_LIBRARY_PATH=", 22) == 0)
+		    ENVPREFIX(environ[i], "BOX64_LD_LIBRARY_PATH="))
 			continue;
 
 		env[j] = xstrdup(environ[i]);
@@ -470,18 +501,15 @@ static char **build_environment(const char *preload_path, int for_box64,
 		/*
 		 * Do NOT set BOX64_LD_PRELOAD — the preload .so is ARM64
 		 * glibc and cannot be loaded into box64's x86_64 context.
-		 * Clear LD_PRELOAD too so the native box64 binary itself
-		 * isn't affected.
+		 * Omit LD_PRELOAD entirely so neither box64 nor the
+		 * emulated process inherits a stale value.
 		 */
-		env[j] = xstrdup("LD_PRELOAD=");
-		if (!env[j]) { free_env(env); return NULL; } j++;
 	} else {
 		if (preload_path && use_preload) {
 			env[j] = xasprintf("LD_PRELOAD=%s", preload_path);
-		} else {
-			env[j] = xstrdup("LD_PRELOAD=");
+			if (!env[j]) { free_env(env); return NULL; } j++;
 		}
-		if (!env[j]) { free_env(env); return NULL; } j++;
+		/* No preload → don't set LD_PRELOAD at all */
 	}
 
 	if (debug) {
@@ -541,19 +569,37 @@ static inline void release_wake_lock(int debug)
 
 /* ── signal forwarding ───────────────────────────────────────────── */
 
-static volatile pid_t g_child_pid = -1;
+/*
+ * Signals to forward to the child process.
+ * Includes SIGWINCH for correct terminal-resize handling in TUI apps.
+ */
+static const int forwarded_sigs[] = {
+	SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2, SIGWINCH,
+};
+
+/*
+ * Use sig_atomic_t — pid_t writes are not guaranteed atomic on all
+ * architectures.  Valid PIDs fit comfortably in sig_atomic_t.
+ */
+static volatile sig_atomic_t g_child_pid;
 
 static void forward_signal(int sig)
 {
-	if (g_child_pid > 0)
-		kill(g_child_pid, sig);
+	pid_t pid = (pid_t)g_child_pid;
+
+	if (pid > 0)
+		kill(pid, sig);
 }
 
-static void setup_signal_forwarding(pid_t child)
+/*
+ * Install signal forwarding handlers.
+ * Must be called BEFORE fork() to avoid a race where a signal arrives
+ * between fork() and handler installation.
+ * g_child_pid is set to 0 initially — the handler checks pid > 0, so
+ * signals arriving before we record the real PID are harmlessly ignored.
+ */
+static void install_signal_handlers(void)
 {
-	static const int sigs[] = {
-		SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2,
-	};
 	struct sigaction sa;
 
 	memset(&sa, 0, sizeof(sa));
@@ -561,10 +607,10 @@ static void setup_signal_forwarding(pid_t child)
 	sa.sa_flags   = SA_RESTART;
 	sigemptyset(&sa.sa_mask);
 
-	g_child_pid = child;
+	g_child_pid = 0;
 
-	for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
-		sigaction(sigs[i], &sa, NULL);
+	for (size_t i = 0; i < ARRAY_SIZE(forwarded_sigs); i++)
+		sigaction(forwarded_sigs[i], &sa, NULL);
 }
 
 /* ── child process execution ─────────────────────────────────────── */
@@ -576,12 +622,8 @@ static void setup_signal_forwarding(pid_t child)
  */
 static void child_reset_signals(void)
 {
-	static const int sigs[] = {
-		SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2,
-	};
-
-	for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
-		signal(sigs[i], SIG_DFL);
+	for (size_t i = 0; i < ARRAY_SIZE(forwarded_sigs); i++)
+		signal(forwarded_sigs[i], SIG_DFL);
 }
 
 /*
@@ -598,8 +640,9 @@ static void chdir_to_binary(const char *binary_path)
 		return;
 
 	dir = dirname(copy);
-	if (dir && *dir && strcmp(dir, ".") != 0)
-		(void)chdir(dir);
+	if (dir && *dir && strcmp(dir, ".") != 0) {
+		if (chdir(dir) < 0) { /* best-effort, non-fatal */ }
+	}
 
 	free(copy);
 }
@@ -623,6 +666,13 @@ static int run_child(const char *exec_path, char **argv, char **envp,
 
 	acquire_wake_lock(debug);
 
+	/*
+	 * Install signal handlers BEFORE fork() to close the race
+	 * window where a signal could arrive after fork() but before
+	 * handler installation.
+	 */
+	install_signal_handlers();
+
 	child = fork();
 	if (child == 0) {
 		/* child */
@@ -639,8 +689,8 @@ static int run_child(const char *exec_path, char **argv, char **envp,
 		return 1;
 	}
 
-	/* parent */
-	setup_signal_forwarding(child);
+	/* parent — record PID so the handler can forward signals */
+	g_child_pid = (sig_atomic_t)child;
 	waitpid(child, &status, 0);
 	release_wake_lock(debug);
 

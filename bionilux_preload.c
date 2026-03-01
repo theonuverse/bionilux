@@ -16,38 +16,41 @@
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
-#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <libgen.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
+
+#include "bionilux_elf.h"
 
 /* ── environment variable names ──────────────────────────────────── */
 
-#define GLIBC_LIB_ENV     "BIONILUX_GLIBC_LIB"
-#define GLIBC_LOADER_ENV  "BIONILUX_GLIBC_LOADER"
-#define BIONILUX_DEBUG_ENV    "BIONILUX_DEBUG"
-#define BIONILUX_ORIG_EXE_ENV "BIONILUX_ORIG_EXE"
+#define GLIBC_LIB_ENV		"BIONILUX_GLIBC_LIB"
+#define GLIBC_LOADER_ENV	"BIONILUX_GLIBC_LOADER"
+#define BIONILUX_DEBUG_ENV	"BIONILUX_DEBUG"
+#define BIONILUX_ORIG_EXE_ENV	"BIONILUX_ORIG_EXE"
+
+/* compile-time prefix match for environment variables */
+#define ENVPREFIX(var, lit)	(strncmp((var), (lit), sizeof(lit) - 1) == 0)
 
 /* ── debug logging ───────────────────────────────────────────────── */
 
 static int debug_enabled;
 
-static void debug_print(const char *fmt, ...)
-	__attribute__((format(printf, 1, 2)));
-
+__attribute__((format(printf, 1, 2)))
 static void debug_print(const char *fmt, ...)
 {
 	if (!debug_enabled)
 		return;
 
 	va_list ap;
+
 	va_start(ap, fmt);
 	fprintf(stderr, "[bionilux] ");
 	vfprintf(stderr, fmt, ap);
@@ -55,92 +58,33 @@ static void debug_print(const char *fmt, ...)
 	va_end(ap);
 }
 
-/* ── cached real function pointers (set in constructor) ──────────── */
+/* ── real function pointers (set in constructor) ─────────────────── */
 
 static int     (*real_execve)(const char *, char *const[], char *const[]);
 static ssize_t (*real_readlink)(const char *, char *, size_t);
 static ssize_t (*real_readlinkat)(int, const char *, char *, size_t);
 
-/* ── ELF inspection ──────────────────────────────────────────────── */
+/*
+ * Fallback execve via raw syscall — used when dlsym(RTLD_NEXT) fails.
+ * This is the ultimate safety net: even if the dynamic linker is
+ * misconfigured, we can still exec.
+ */
+static int fallback_execve(const char *path, char *const argv[],
+			   char *const envp[])
+{
+	return (int)syscall(SYS_execve, path, argv, envp);
+}
 
 /*
- * Check whether @path is a glibc ELF that needs to be routed through
- * the Termux glibc loader.
- *
- * Returns:  1  → glibc binary (redirect through loader)
- *           0  → not glibc / not ELF / static / already set up
- *          -1  → I/O error
- *
- * Uses pread() to avoid the 4096-byte-buffer limitation.
+ * Safe wrapper: calls real_execve if resolved, otherwise falls back
+ * to the raw syscall.  Never crashes on NULL function pointer.
  */
-static int is_glibc_elf(const char *path)
+static inline int safe_execve(const char *path, char *const argv[],
+			      char *const envp[])
 {
-	Elf64_Ehdr ehdr;
-	int fd, ret = 0;
-
-	fd = open(path, O_RDONLY);
-	if (fd < 0)
-		return -1;
-
-	if (pread(fd, &ehdr, sizeof(ehdr), 0) != sizeof(ehdr))
-		goto out;
-
-	if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0)
-		goto out;
-	if (ehdr.e_ident[EI_CLASS] != ELFCLASS64)
-		goto out;
-	if (ehdr.e_type != ET_EXEC && ehdr.e_type != ET_DYN)
-		goto out;
-	if (ehdr.e_phoff == 0 || ehdr.e_phnum == 0)
-		goto out;
-
-	for (unsigned i = 0; i < ehdr.e_phnum; i++) {
-		Elf64_Phdr phdr;
-		off_t off = (off_t)(ehdr.e_phoff + (Elf64_Off)i * ehdr.e_phentsize);
-
-		if (pread(fd, &phdr, sizeof(phdr), off) != sizeof(phdr))
-			break;
-
-		if (phdr.p_type != PT_INTERP)
-			continue;
-
-		if (phdr.p_filesz == 0 || phdr.p_filesz > PATH_MAX)
-			break;
-
-		char interp[PATH_MAX];
-		if (pread(fd, interp, phdr.p_filesz, (off_t)phdr.p_offset)
-		    != (ssize_t)phdr.p_filesz)
-			break;
-
-		interp[phdr.p_filesz - 1] = '\0'; /* ensure NUL */
-
-		debug_print("interpreter: %s", interp);
-
-		/*
-		 * musl ≠ glibc.  They are ABI-incompatible.
-		 * Do NOT redirect musl binaries through the glibc loader.
-		 */
-		if (strstr(interp, "ld-musl"))
-			break;
-
-		if (strstr(interp, "ld-linux")) {
-			/*
-			 * If the interpreter already points into the Termux
-			 * glibc prefix we're set up — no redirect needed.
-			 */
-			const char *glibc_lib = getenv(GLIBC_LIB_ENV);
-			if (glibc_lib && strstr(interp, glibc_lib)) {
-				debug_print("already using Termux glibc loader");
-				break;
-			}
-			ret = 1;
-		}
-		break; /* PT_INTERP found, stop */
-	}
-
-out:
-	close(fd);
-	return ret;
+	if (real_execve)
+		return real_execve(path, argv, envp);
+	return fallback_execve(path, argv, envp);
 }
 
 /* ── path resolution ─────────────────────────────────────────────── */
@@ -148,11 +92,11 @@ out:
 /*
  * Resolve @path to an absolute path.
  *
- * - Absolute: copy as-is.
- * - Bare name (no '/'): search PATH.
- * - Relative with '/': prepend CWD.
+ *   Absolute        → copy as-is
+ *   Bare name       → search $PATH
+ *   Relative with / → prepend CWD
  *
- * Returns @resolved on success, NULL on failure.
+ * Always returns @resolved (caller-owned buffer of PATH_MAX bytes).
  */
 static char *resolve_path(const char *path, char *resolved)
 {
@@ -162,17 +106,20 @@ static char *resolve_path(const char *path, char *resolved)
 	}
 
 	if (!strchr(path, '/')) {
-		/* bare name → PATH lookup */
 		const char *path_env = getenv("PATH");
+
 		if (path_env) {
 			char *dup = strdup(path_env);
+
 			if (dup) {
 				char *saveptr;
-				for (char *dir = strtok_r(dup, ":", &saveptr);
+				char *dir;
+
+				for (dir = strtok_r(dup, ":", &saveptr);
 				     dir;
 				     dir = strtok_r(NULL, ":", &saveptr)) {
-					snprintf(resolved, PATH_MAX, "%s/%s",
-						 dir, path);
+					snprintf(resolved, PATH_MAX,
+						 "%s/%s", dir, path);
 					if (access(resolved, X_OK) == 0) {
 						free(dup);
 						return resolved;
@@ -184,10 +131,13 @@ static char *resolve_path(const char *path, char *resolved)
 	}
 
 	/* relative path with '/' → prepend CWD */
-	char cwd[PATH_MAX];
-	if (getcwd(cwd, sizeof(cwd))) {
-		snprintf(resolved, PATH_MAX, "%s/%s", cwd, path);
-		return resolved;
+	{
+		char cwd[PATH_MAX];
+
+		if (getcwd(cwd, sizeof(cwd))) {
+			snprintf(resolved, PATH_MAX, "%s/%s", cwd, path);
+			return resolved;
+		}
 	}
 
 	snprintf(resolved, PATH_MAX, "%s", path);
@@ -213,15 +163,18 @@ static char **build_loader_argv(const char *loader, const char *lib_path,
 				const char *binary, char *const argv[])
 {
 	size_t argc = 0;
+	size_t new_argc, k;
+	char **av;
+
 	while (argv[argc])
 		argc++;
 
-	size_t new_argc = 6 + (argc > 0 ? argc - 1 : 0);
-	char **av = calloc(new_argc + 1, sizeof(char *));
+	new_argc = 6 + (argc > 0 ? argc - 1 : 0);
+	av = calloc(new_argc + 1, sizeof(char *));
 	if (!av)
 		return NULL;
 
-	size_t k = 0;
+	k = 0;
 	av[k++] = strdup(loader);
 	av[k++] = strdup("--library-path");
 	av[k++] = strdup(lib_path);
@@ -246,38 +199,47 @@ static char **build_loader_argv(const char *loader, const char *lib_path,
 
 /*
  * Build envp for glibc child: keep everything, update BIONILUX_ORIG_EXE.
+ * Strips libtermux-exec from LD_PRELOAD (bionic-only, breaks glibc).
  */
 static char **build_new_envp(char *const envp[], const char *orig_exe)
 {
 	size_t envc = 0;
+	size_t j = 0;
+	size_t len;
+	char **ev;
+
 	while (envp[envc])
 		envc++;
 
-	char **ev = calloc(envc + 2, sizeof(char *));
+	ev = calloc(envc + 2, sizeof(char *));
 	if (!ev)
 		return NULL;
 
-	size_t j = 0;
 	for (size_t i = 0; i < envc; i++) {
 		/* skip bionic-only LD_PRELOAD (libtermux-exec) */
-		if (strncmp(envp[i], "LD_PRELOAD=", 11) == 0 &&
+		if (ENVPREFIX(envp[i], "LD_PRELOAD=") &&
 		    strstr(envp[i], "libtermux-exec"))
 			continue;
 
 		/* skip existing BIONILUX_ORIG_EXE */
-		if (strncmp(envp[i], BIONILUX_ORIG_EXE_ENV "=",
-			    strlen(BIONILUX_ORIG_EXE_ENV "=")) == 0)
+		if (ENVPREFIX(envp[i], BIONILUX_ORIG_EXE_ENV "="))
 			continue;
 
 		ev[j] = strdup(envp[i]);
-		if (!ev[j]) { free_strarray(ev); return NULL; }
+		if (!ev[j]) {
+			free_strarray(ev);
+			return NULL;
+		}
 		j++;
 	}
 
 	/* add BIONILUX_ORIG_EXE */
-	size_t len = strlen(BIONILUX_ORIG_EXE_ENV) + 1 + strlen(orig_exe) + 1;
+	len = sizeof(BIONILUX_ORIG_EXE_ENV) + strlen(orig_exe) + 1;
 	ev[j] = malloc(len);
-	if (!ev[j]) { free_strarray(ev); return NULL; }
+	if (!ev[j]) {
+		free_strarray(ev);
+		return NULL;
+	}
 	snprintf(ev[j], len, "%s=%s", BIONILUX_ORIG_EXE_ENV, orig_exe);
 	j++;
 
@@ -287,36 +249,42 @@ static char **build_new_envp(char *const envp[], const char *orig_exe)
 
 /*
  * Build a cleaned envp for non-glibc (bionic) child processes.
- * Removes glibc paths from LD_LIBRARY_PATH and the glibc LD_PRELOAD.
+ * Removes glibc paths from LD_LIBRARY_PATH and the bionilux LD_PRELOAD.
+ * Also strips LD_AUDIT and LD_DEBUG inherited from the glibc environment
+ * — they are glibc-specific and meaningless (or harmful) under bionic.
  */
 static char **build_clean_envp(char *const envp[])
 {
 	const char *glibc_lib = getenv(GLIBC_LIB_ENV);
 	size_t envc = 0;
+	size_t j = 0;
+	char **ev;
+
 	while (envp[envc])
 		envc++;
 
-	char **ev = calloc(envc + 1, sizeof(char *));
+	ev = calloc(envc + 1, sizeof(char *));
 	if (!ev)
 		return NULL;
 
-	size_t j = 0;
 	for (size_t i = 0; i < envc; i++) {
-
 		/* filter glibc paths from LD_LIBRARY_PATH */
-		if (strncmp(envp[i], "LD_LIBRARY_PATH=", 16) == 0 &&
+		if (ENVPREFIX(envp[i], "LD_LIBRARY_PATH=") &&
 		    glibc_lib && strstr(envp[i], glibc_lib)) {
 			const char *value = envp[i] + 16;
 			char *dup = strdup(value);
+
 			if (!dup) {
 				/* OOM fallback: copy as-is */
 				ev[j] = strdup(envp[i]);
-				if (!ev[j]) { free_strarray(ev); return NULL; }
+				if (!ev[j]) {
+					free_strarray(ev);
+					return NULL;
+				}
 				j++;
 				continue;
 			}
 
-			/* rebuild without glibc components */
 			char result[PATH_MAX * 4];
 			size_t off = 0;
 			char *saveptr;
@@ -330,30 +298,48 @@ static char **build_clean_envp(char *const envp[])
 						 sizeof(result) - off,
 						 "%s%s",
 						 off ? ":" : "", tok);
-				if (n > 0 && (size_t)n < sizeof(result) - off)
+				if (n > 0 &&
+				    (size_t)n < sizeof(result) - off)
 					off += (size_t)n;
 			}
 			free(dup);
 
 			if (off > 0) {
 				size_t sz = 17 + off + 1;
+
 				ev[j] = malloc(sz);
-				if (!ev[j]) { free_strarray(ev); return NULL; }
-				snprintf(ev[j], sz, "LD_LIBRARY_PATH=%s", result);
+				if (!ev[j]) {
+					free_strarray(ev);
+					return NULL;
+				}
+				snprintf(ev[j], sz,
+					 "LD_LIBRARY_PATH=%s", result);
 				j++;
 			}
 			continue;
 		}
 
 		/* remove glibc preload */
-		if (strncmp(envp[i], "LD_PRELOAD=", 11) == 0 &&
+		if (ENVPREFIX(envp[i], "LD_PRELOAD=") &&
 		    strstr(envp[i], "libbionilux_preload")) {
-			debug_print("removing glibc LD_PRELOAD for bionic child");
+			debug_print("stripping glibc LD_PRELOAD for "
+				    "bionic child");
 			continue;
 		}
 
+		/*
+		 * Strip LD_AUDIT and LD_DEBUG — glibc-specific,
+		 * meaningless and potentially harmful under bionic.
+		 */
+		if (ENVPREFIX(envp[i], "LD_AUDIT=") ||
+		    ENVPREFIX(envp[i], "LD_DEBUG="))
+			continue;
+
 		ev[j] = strdup(envp[i]);
-		if (!ev[j]) { free_strarray(ev); return NULL; }
+		if (!ev[j]) {
+			free_strarray(ev);
+			return NULL;
+		}
 		j++;
 	}
 
@@ -363,34 +349,45 @@ static char **build_clean_envp(char *const envp[])
 
 /* ── hooked exec functions ───────────────────────────────────────── */
 
+/*
+ * Central execve hook — all other exec wrappers funnel through here.
+ *
+ * Logic:
+ *   1. If BIONILUX env vars are not set → pass through.
+ *   2. Resolve the binary path.
+ *   3. If it is a glibc ELF → rewrite argv to go through the loader.
+ *   4. Otherwise → clean the environment and exec normally.
+ */
 int execve(const char *pathname, char *const argv[], char *const envp[])
 {
 	const char *glibc_lib    = getenv(GLIBC_LIB_ENV);
 	const char *glibc_loader = getenv(GLIBC_LOADER_ENV);
+	char resolved[PATH_MAX];
+	int glibc_bin;
 
 	if (!glibc_lib || !glibc_loader) {
 		debug_print("BIONILUX env vars not set, pass-through");
-		return real_execve(pathname, argv, envp);
+		return safe_execve(pathname, argv, envp);
 	}
 
-	char resolved[PATH_MAX];
 	resolve_path(pathname, resolved);
+	debug_print("execve: %s -> %s", pathname, resolved);
 
-	debug_print("execve: %s → %s", pathname, resolved);
-
-	int glibc = is_glibc_elf(resolved);
-	if (glibc != 1) {
-		debug_print("not glibc (result=%d), cleaning env", glibc);
+	glibc_bin = is_glibc_elf(resolved, glibc_lib);
+	if (glibc_bin != 1) {
+		debug_print("not glibc (result=%d), cleaning env", glibc_bin);
 
 		char **clean = build_clean_envp(envp);
+
 		if (clean) {
-			int ret = real_execve(pathname, argv, clean);
+			int ret = safe_execve(pathname, argv, clean);
 			int e = errno;
+
 			free_strarray(clean);
 			errno = e;
 			return ret;
 		}
-		return real_execve(pathname, argv, envp);
+		return safe_execve(pathname, argv, envp);
 	}
 
 	debug_print("glibc binary detected, redirecting through loader");
@@ -398,20 +395,22 @@ int execve(const char *pathname, char *const argv[], char *const envp[])
 	char **new_argv = build_loader_argv(glibc_loader, glibc_lib,
 					    resolved, argv);
 	if (!new_argv)
-		return real_execve(pathname, argv, envp);
+		return safe_execve(pathname, argv, envp);
 
 	char **new_envp = build_new_envp(envp, resolved);
+
 	if (!new_envp) {
 		free_strarray(new_argv);
-		return real_execve(pathname, argv, envp);
+		return safe_execve(pathname, argv, envp);
 	}
 
 	debug_print("exec: %s %s %s %s %s %s",
 		    new_argv[0], new_argv[1], new_argv[2],
 		    new_argv[3], new_argv[4], new_argv[5]);
 
-	int ret = real_execve(glibc_loader, new_argv, new_envp);
+	int ret = safe_execve(glibc_loader, new_argv, new_envp);
 	int e = errno;
+
 	free_strarray(new_argv);
 	free_strarray(new_envp);
 	errno = e;
@@ -426,6 +425,7 @@ int execv(const char *pathname, char *const argv[])
 int execvp(const char *file, char *const argv[])
 {
 	char resolved[PATH_MAX];
+
 	resolve_path(file, resolved);
 	return execve(resolved, argv, environ);
 }
@@ -433,24 +433,175 @@ int execvp(const char *file, char *const argv[])
 int execvpe(const char *file, char *const argv[], char *const envp[])
 {
 	char resolved[PATH_MAX];
+
 	resolve_path(file, resolved);
 	return execve(resolved, argv, envp);
 }
 
+/*
+ * Variadic exec wrappers — convert va_list to argv[], then call
+ * through our hooked execve / execvp.
+ *
+ * These are necessary because glibc's internal implementation of
+ * execl() may bypass our execve() hook by calling __execve directly.
+ */
+int execl(const char *pathname, const char *arg, ...)
+{
+	va_list ap;
+	size_t argc = 1;
+	char **argv;
+	int ret;
+
+	/* count arguments (including the first, excluding trailing NULL) */
+	va_start(ap, arg);
+	while (va_arg(ap, const char *))
+		argc++;
+	va_end(ap);
+
+	argv = calloc(argc + 1, sizeof(char *));
+	if (!argv) {
+		errno = ENOMEM;
+		return -1;
+	}
+
+	argv[0] = (char *)arg;
+	va_start(ap, arg);
+	for (size_t i = 1; i < argc; i++)
+		argv[i] = va_arg(ap, char *);
+	va_end(ap);
+	argv[argc] = NULL;
+
+	ret = execv(pathname, argv);
+	free(argv);
+	return ret;
+}
+
+int execlp(const char *file, const char *arg, ...)
+{
+	va_list ap;
+	size_t argc = 1;
+	char **argv;
+	int ret;
+
+	va_start(ap, arg);
+	while (va_arg(ap, const char *))
+		argc++;
+	va_end(ap);
+
+	argv = calloc(argc + 1, sizeof(char *));
+	if (!argv) {
+		errno = ENOMEM;
+		return -1;
+	}
+
+	argv[0] = (char *)arg;
+	va_start(ap, arg);
+	for (size_t i = 1; i < argc; i++)
+		argv[i] = va_arg(ap, char *);
+	va_end(ap);
+	argv[argc] = NULL;
+
+	ret = execvp(file, argv);
+	free(argv);
+	return ret;
+}
+
+int execle(const char *pathname, const char *arg, ... /*, char *const envp[] */)
+{
+	va_list ap;
+	size_t argc = 1;
+	char **argv;
+	char *const *envp;
+	int ret;
+
+	/* count args (the envp pointer follows the trailing NULL) */
+	va_start(ap, arg);
+	while (va_arg(ap, const char *))
+		argc++;
+	va_end(ap);
+
+	argv = calloc(argc + 1, sizeof(char *));
+	if (!argv) {
+		errno = ENOMEM;
+		return -1;
+	}
+
+	argv[0] = (char *)arg;
+	va_start(ap, arg);
+	for (size_t i = 1; i < argc; i++)
+		argv[i] = va_arg(ap, char *);
+	envp = va_arg(ap, char *const *);
+	va_end(ap);
+	argv[argc] = NULL;
+
+	ret = execve(pathname, argv, envp);
+	free(argv);
+	return ret;
+}
+
 /* ── hooked readlink / readlinkat ────────────────────────────────── */
+
+/*
+ * Check whether the combination of @dirfd + @pathname refers to
+ * /proc/self/exe.  Handles:
+ *   - readlink("/proc/self/exe", ...)
+ *   - readlinkat(AT_FDCWD, "/proc/self/exe", ...)
+ *   - readlinkat(fd_for_proc_self, "exe", ...)
+ */
+static int is_proc_self_exe(int dirfd, const char *pathname)
+{
+	if (strcmp(pathname, "/proc/self/exe") == 0)
+		return 1;
+
+	/*
+	 * Handle readlinkat(fd, "exe", ...) where fd points to
+	 * /proc/self/.  Some programs open the directory and use
+	 * relative paths.
+	 */
+	if (dirfd != AT_FDCWD && strcmp(pathname, "exe") == 0) {
+		char fd_path[64];
+		char link_target[PATH_MAX];
+		ssize_t len;
+
+		snprintf(fd_path, sizeof(fd_path),
+			 "/proc/self/fd/%d", dirfd);
+		/* use real_readlink to avoid recursion through our hook */
+		len = real_readlink
+		      ? real_readlink(fd_path, link_target,
+				      sizeof(link_target) - 1)
+		      : -1;
+		if (len > 0) {
+			link_target[len] = '\0';
+			if (strcmp(link_target, "/proc/self") == 0 ||
+			    strcmp(link_target, "/proc/self/") == 0)
+				return 1;
+		}
+	}
+
+	return 0;
+}
 
 ssize_t readlink(const char *pathname, char *buf, size_t bufsiz)
 {
-	ssize_t ret = real_readlink(pathname, buf, bufsiz);
+	ssize_t ret;
+
+	if (!real_readlink) {
+		errno = ENOSYS;
+		return -1;
+	}
+
+	ret = real_readlink(pathname, buf, bufsiz);
 
 	if (ret > 0 && strcmp(pathname, "/proc/self/exe") == 0) {
 		const char *orig = getenv(BIONILUX_ORIG_EXE_ENV);
+
 		if (orig) {
 			size_t len = strlen(orig);
+
 			if (len < bufsiz) {
 				memcpy(buf, orig, len);
-				debug_print("readlink(/proc/self/exe) → %s",
-					    orig);
+				debug_print("readlink(/proc/self/exe)"
+					    " -> %s", orig);
 				return (ssize_t)len;
 			}
 		}
@@ -459,18 +610,28 @@ ssize_t readlink(const char *pathname, char *buf, size_t bufsiz)
 	return ret;
 }
 
-ssize_t readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz)
+ssize_t readlinkat(int dirfd, const char *pathname,
+		   char *buf, size_t bufsiz)
 {
-	ssize_t ret = real_readlinkat(dirfd, pathname, buf, bufsiz);
+	ssize_t ret;
 
-	if (ret > 0 && strcmp(pathname, "/proc/self/exe") == 0) {
+	if (!real_readlinkat) {
+		errno = ENOSYS;
+		return -1;
+	}
+
+	ret = real_readlinkat(dirfd, pathname, buf, bufsiz);
+
+	if (ret > 0 && is_proc_self_exe(dirfd, pathname)) {
 		const char *orig = getenv(BIONILUX_ORIG_EXE_ENV);
+
 		if (orig) {
 			size_t len = strlen(orig);
+
 			if (len < bufsiz) {
 				memcpy(buf, orig, len);
-				debug_print("readlinkat(/proc/self/exe) → %s",
-					    orig);
+				debug_print("readlinkat(%d, %s) -> %s",
+					    dirfd, pathname, orig);
 				return (ssize_t)len;
 			}
 		}
@@ -484,12 +645,31 @@ ssize_t readlinkat(int dirfd, const char *pathname, char *buf, size_t bufsiz)
 __attribute__((constructor))
 static void init(void)
 {
-	/* cache real function pointers once, thread-safely */
-	*(void **)&real_execve     = dlsym(RTLD_NEXT, "execve");
-	*(void **)&real_readlink   = dlsym(RTLD_NEXT, "readlink");
+	/*
+	 * Use *(void **)& to assign dlsym results to function pointers
+	 * without triggering -Wpedantic warnings about void* → fptr
+	 * conversion (which is technically undefined in ISO C but
+	 * required by POSIX dlsym).
+	 */
+	*(void **)&real_execve = dlsym(RTLD_NEXT, "execve");
+	if (!real_execve)
+		fprintf(stderr, "[bionilux] WARNING: dlsym(execve) "
+			"failed: %s — using syscall fallback\n",
+			dlerror() ? dlerror() : "unknown");
+
+	*(void **)&real_readlink = dlsym(RTLD_NEXT, "readlink");
+	if (!real_readlink)
+		fprintf(stderr, "[bionilux] WARNING: dlsym(readlink) "
+			"failed: %s\n",
+			dlerror() ? dlerror() : "unknown");
+
 	*(void **)&real_readlinkat = dlsym(RTLD_NEXT, "readlinkat");
+	if (!real_readlinkat)
+		fprintf(stderr, "[bionilux] WARNING: dlsym(readlinkat) "
+			"failed: %s\n",
+			dlerror() ? dlerror() : "unknown");
 
 	debug_enabled = (getenv(BIONILUX_DEBUG_ENV) != NULL);
 
-	debug_print("bionilux_preload loaded");
+	debug_print("bionilux_preload loaded (pid=%d)", (int)getpid());
 }

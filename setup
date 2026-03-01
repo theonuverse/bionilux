@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # SPDX-License-Identifier: MIT
 #
-# bionilux — one-command installer (v0.2.0)
+# bionilux — one-command installer
 #
 # Usage:
 #   curl -sL https://raw.githubusercontent.com/theonuverse/bionilux/main/setup | bash
@@ -41,6 +41,19 @@ dl() {
     curl -fSL --progress-bar -o "$dest" "$BASE/$name" || die "Download failed: $name"
 }
 
+# ── checksum verification ────────────────────────────────────────────
+# When SHA256SUMS is available, verify downloaded files.
+verify() {
+    local file="$1"
+    if [ -f SHA256SUMS ] && command -v sha256sum >/dev/null 2>&1; then
+        if sha256sum -c SHA256SUMS --ignore-missing --status 2>/dev/null; then
+            ok "checksum OK: $file"
+        else
+            warn "checksum mismatch or not listed: $file (continuing)"
+        fi
+    fi
+}
+
 # ── main ─────────────────────────────────────────────────────────────
 printf "\n${B}  bionilux installer v${VERSION}${N}\n\n"
 
@@ -50,23 +63,30 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 cd "$tmpdir"
 
+# Try to fetch checksums (non-fatal if unavailable)
+curl -fsSL -o SHA256SUMS "$BASE/SHA256SUMS" 2>/dev/null || true
+
 # 1) bionilux binary
 dl bionilux bionilux
+verify bionilux
 install -m 755 bionilux "$PREFIX/bin/bionilux"
 ok "bionilux → $PREFIX/bin/"
 
 # 2) libbionilux_preload.so
 dl libbionilux_preload.so libbionilux_preload.so
+verify libbionilux_preload.so
 install -m 755 libbionilux_preload.so "$GLIBC_PREFIX/lib/libbionilux_preload.so"
 ok "preload  → $GLIBC_PREFIX/lib/"
 
 # 3) box64
 dl box64 box64
+verify box64
 install -m 755 box64 "$PREFIX/bin/box64"
 ok "box64    → $PREFIX/bin/"
 
 # 4) x86_64 compat libs
 dl x86_64-linux-gnu.tar.gz x86_64-linux-gnu.tar.gz
+verify x86_64-linux-gnu.tar.gz
 mkdir -p "$GLIBC_PREFIX/lib/x86_64-linux-gnu"
 tar xzf x86_64-linux-gnu.tar.gz --strip-components=1 -C "$GLIBC_PREFIX/lib/x86_64-linux-gnu"
 ok "x86_64   → $GLIBC_PREFIX/lib/x86_64-linux-gnu/"

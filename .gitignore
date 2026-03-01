@@ -4,10 +4,12 @@ libbionilux_preload.so
 *.o
 *.bak
 
-# Binaries
+# Binaries — never commit compiled output
 /bionilux
 /box64
 
-# Legacy lib path (pre-v0.2.0)
+# Legacy lib path (pre-v0.2.0) — should not be tracked
+lib_x86_64/
+lib_x86_64.tar.gz
 lib_x86_64*
 ovgl
