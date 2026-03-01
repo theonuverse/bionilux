@@ -112,34 +112,17 @@ mkdir -p "$GLIBC_PREFIX/bin"
 # ── step 1: preload library (glibc sysroot) ─────────────────────────
 info "Step 1: Building preload library..."
 
-# Locate GCC runtime (crtbeginS.o, libgcc) — search multiple locations.
-GCC_LIB_DIR=""
-for search_root in "$GLIBC_PREFIX/lib/gcc" "$PREFIX/lib/gcc" /usr/lib/gcc; do
-    [ -d "$search_root" ] || continue
-    match="$(find "$search_root" -name crtbeginS.o -print 2>/dev/null | head -1)"
-    if [ -n "$match" ]; then
-        GCC_LIB_DIR="$(dirname "$match")"
-        break
-    fi
-done
-
-GCC_FLAGS=""
-if [ -n "$GCC_LIB_DIR" ]; then
-    info "Found GCC runtime at $GCC_LIB_DIR"
-    GCC_FLAGS="-L$GCC_LIB_DIR -B$GCC_LIB_DIR"
-else
-    warn "GCC runtime (crtbeginS.o) not found — trying -nostartfiles"
-    GCC_FLAGS="-nostartfiles"
-fi
-
+# For a shared library we don't need GCC's crt*.o startup files.
+# Use -nostdlib to prevent clang from pulling in -lgcc (which isn't
+# in the Termux glibc sysroot).  We explicitly link -lc and -ldl.
 LD_PRELOAD="" clang \
     --sysroot="$GLIBC_PREFIX" \
     -shared -fPIC -O2 \
+    -nostdlib \
     -Wall -Wextra -Wpedantic \
     --target=aarch64-linux-gnu \
     -I"$GLIBC_PREFIX/include" \
     -L"$GLIBC_PREFIX/lib" \
-    $GCC_FLAGS \
     -Wl,--dynamic-linker="$GLIBC_PREFIX/lib/ld-linux-aarch64.so.1" \
     -Wl,-rpath,"$GLIBC_PREFIX/lib" \
     -Wl,--no-as-needed \
