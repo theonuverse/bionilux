@@ -1,139 +1,81 @@
-#!/bin/bash
+#!/data/data/com.termux/files/usr/bin/bash
 # SPDX-License-Identifier: MIT
 #
-# bionilux quick installer (v0.2.0)
-# Usage: curl -sL https://theonuverse.github.io/bionilux/setup | bash
+# bionilux — one-command installer (v0.2.0)
+#
+# Usage:
+#   curl -sL https://raw.githubusercontent.com/theonuverse/bionilux/main/setup | bash
 #
 set -eu
 
 readonly VERSION="0.2.0"
 readonly PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 readonly GLIBC_PREFIX="$PREFIX/glibc"
-readonly RELEASE_BASE="https://github.com/theonuverse/bionilux/releases/download/v${VERSION}"
+readonly BASE="https://github.com/theonuverse/bionilux/releases/download/v${VERSION}"
 
-# -- colours -----------------------------------------------------------------
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# ── colours ──────────────────────────────────────────────────────────
+G='\033[0;32m' Y='\033[1;33m' R='\033[0;31m' B='\033[0;34m' N='\033[0m'
 
-info()  { printf "${GREEN}[INFO]${NC} %s\n" "$1"; }
-warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
-err()   { printf "${RED}[ERROR]${NC} %s\n" "$1"; }
-die()   { err "$1"; exit 1; }
+ok()   { printf "${G}[✓]${N} %s\n" "$*"; }
+info() { printf "${B}[·]${N} %s\n" "$*"; }
+warn() { printf "${Y}[!]${N} %s\n" "$*"; }
+die()  { printf "${R}[✗]${N} %s\n" "$*" >&2; exit 1; }
 
-# -- helpers -----------------------------------------------------------------
+# ── pre-flight ───────────────────────────────────────────────────────
+command -v curl >/dev/null 2>&1 || die "curl not found.  Run: pkg install curl"
+[ -d "$GLIBC_PREFIX" ]         || die "glibc not found.  Run: pkg install glibc-repo && pkg install glibc"
 
-print_header() {
-	printf "\n"
-	printf "${BLUE}+------------------------------------+${NC}\n"
-	printf "${BLUE}|   bionilux Quick Installer  (v%s)   |${NC}\n" "$VERSION"
-	printf "${BLUE}+------------------------------------+${NC}\n\n"
+# ── libc.so symlink fix ─────────────────────────────────────────────
+fix_libc() {
+    local lib="$GLIBC_PREFIX/lib"
+    if [ -f "$lib/libc.so" ] && [ ! -L "$lib/libc.so" ]; then
+        mv "$lib/libc.so" "$lib/libc.so.script" 2>/dev/null || true
+    fi
+    [ -L "$lib/libc.so" ] || ln -sf libc.so.6 "$lib/libc.so" 2>/dev/null || true
 }
 
-ensure_packages() {
-	info "Updating packages ..."
-	yes | pkg up >/dev/null 2>&1 || warn "pkg up returned non-zero"
-
-	info "Installing required packages: glibc-repo glibc curl"
-	pkg install glibc-repo -y >/dev/null 2>&1 || die "Failed to install glibc-repo"
-	pkg install glibc curl   -y >/dev/null 2>&1 || die "Failed to install glibc or curl"
+# ── download helper ──────────────────────────────────────────────────
+dl() {
+    local name="$1" dest="$2"
+    info "Downloading $name ..."
+    curl -fSL --progress-bar -o "$dest" "$BASE/$name" || die "Download failed: $name"
 }
 
-fix_libc_symlink() {
-	local lib="$GLIBC_PREFIX/lib"
+# ── main ─────────────────────────────────────────────────────────────
+printf "\n${B}  bionilux installer v${VERSION}${N}\n\n"
 
-	if [ -f "$lib/libc.so" ] && [ ! -L "$lib/libc.so" ]; then
-		info "Backing up linker script libc.so -> libc.so.script"
-		mv "$lib/libc.so" "$lib/libc.so.script" || warn "Could not move libc.so"
-	fi
+fix_libc
 
-	if [ ! -L "$lib/libc.so" ]; then
-		ln -sf libc.so.6 "$lib/libc.so" || warn "Could not create libc.so symlink"
-	fi
-}
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+cd "$tmpdir"
 
-# download URL DEST [SHA256]
-download() {
-	local url="$RELEASE_BASE/$1"
-	local dest="$2"
-	local want="${3:-}"
+# 1) bionilux binary
+dl bionilux bionilux
+install -m 755 bionilux "$PREFIX/bin/bionilux"
+ok "bionilux → $PREFIX/bin/"
 
-	info "Downloading $1 ..."
-	if ! curl -fsSL -o "$dest" "$url"; then
-		warn "Failed to download $url"
-		return 1
-	fi
+# 2) libbionilux_preload.so
+dl libbionilux_preload.so libbionilux_preload.so
+install -m 755 libbionilux_preload.so "$GLIBC_PREFIX/lib/libbionilux_preload.so"
+ok "preload  → $GLIBC_PREFIX/lib/"
 
-	if [ -n "$want" ] && command -v sha256sum >/dev/null 2>&1; then
-		local got
-		got=$(sha256sum "$dest" | awk '{print $1}')
-		if [ "$got" != "$want" ]; then
-			rm -f "$dest"
-			die "Checksum mismatch for $dest (expected $want, got $got)"
-		fi
-		info "Checksum OK: $dest"
-	fi
-}
+# 3) box64
+dl box64 box64
+install -m 755 box64 "$PREFIX/bin/box64"
+ok "box64    → $PREFIX/bin/"
 
-# -- main --------------------------------------------------------------------
+# 4) x86_64 compat libs
+dl lib_x86_64.tar.gz lib_x86_64.tar.gz
+mkdir -p "$GLIBC_PREFIX/lib/x86_64-linux-gnu"
+tar xzf lib_x86_64.tar.gz --strip-components=1 -C "$GLIBC_PREFIX/lib/x86_64-linux-gnu"
+ok "x86_64   → $GLIBC_PREFIX/lib/x86_64-linux-gnu/"
 
-main() {
-	print_header
-	ensure_packages
-	fix_libc_symlink
+# 5) box64 wrapper (glibc bin dir)
+mkdir -p "$GLIBC_PREFIX/bin"
 
-	# Work in a temporary directory, cleaned up on exit.
-	local tmpdir
-	tmpdir=$(mktemp -d)
-	trap 'rm -rf "$tmpdir"' EXIT
-	cd "$tmpdir"
-
-	# -- bionilux binary --
-	download bionilux bionilux
-	install -m 755 bionilux "$PREFIX/bin/bionilux"
-	info "Installed bionilux to $PREFIX/bin/"
-
-	# -- box64 --
-	if download box64 box64; then
-		install -m 755 box64 "$PREFIX/bin/box64"
-		info "Installed box64 to $PREFIX/bin/"
-	else
-		warn "box64 not installed (download failed)"
-	fi
-
-	# -- x86_64 compatibility libraries --
-	local libdir="$GLIBC_PREFIX/lib/x86_64-linux-gnu"
-	mkdir -p "$libdir"
-
-	if download lib_x86_64.tar.gz lib_x86_64.tar.gz; then
-		tar -xzf lib_x86_64.tar.gz --strip-components=1 -C "$libdir"
-		info "Installed x86_64 libs to $libdir"
-	else
-		warn "x86_64 libs not installed; populate $libdir manually"
-	fi
-
-	# -- preload library --
-	if download libbionilux_preload.so libbionilux_preload.so; then
-		install -m 755 libbionilux_preload.so "$GLIBC_PREFIX/lib/libbionilux_preload.so"
-		info "Installed preload library to $GLIBC_PREFIX/lib/"
-	else
-		warn "Preload library not found; bionilux will extract its embedded copy"
-	fi
-
-	# -- glibc bin dir (for box64 wrapper) --
-	mkdir -p "$GLIBC_PREFIX/bin"
-
-	# -- done ----------------------------------------------------------------
-	printf "\n"
-	printf "${GREEN}+------------------------------------+${NC}\n"
-	printf "${GREEN}|        Installation complete       |${NC}\n"
-	printf "${GREEN}+------------------------------------+${NC}\n\n"
-	printf "  bionilux / box64  : ${YELLOW}%s/bin/${NC}\n" "$PREFIX"
-	printf "  x86_64 libs   : ${YELLOW}%s${NC}\n" "$libdir"
-	printf "  preload       : ${YELLOW}%s/lib/libbionilux_preload.so${NC}\n\n" "$GLIBC_PREFIX"
-	printf "${BLUE}Run:${NC}  bionilux <binary> [args ...]\n\n"
-}
-
-main "$@"
+# ── done ─────────────────────────────────────────────────────────────
+printf "\n${G}  ✓ bionilux v${VERSION} installed${N}\n\n"
+printf "  ${Y}bionilux <binary> [args...]${N}     Run a binary\n"
+printf "  ${Y}bionilux -d <binary>${N}            Debug mode\n"
+printf "  ${Y}bionilux --version${N}              Version info\n\n"
