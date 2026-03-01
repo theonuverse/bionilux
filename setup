@@ -3,9 +3,6 @@
 #
 # bionilux — one-command installer
 #
-# Usage:
-#   curl -sL https://raw.githubusercontent.com/theonuverse/bionilux/main/setup | bash
-#
 set -eu
 
 readonly VERSION="0.2.0"
@@ -16,14 +13,26 @@ readonly BASE="https://github.com/theonuverse/bionilux/releases/download/v${VERS
 # ── colours ──────────────────────────────────────────────────────────
 G='\033[0;32m' Y='\033[1;33m' R='\033[0;31m' B='\033[0;34m' N='\033[0m'
 
-ok()   { printf "${G}[✓]${N} %s\n" "$*"; }
-info() { printf "${B}[·]${N} %s\n" "$*"; }
-warn() { printf "${Y}[!]${N} %s\n" "$*"; }
-die()  { printf "${R}[✗]${N} %s\n" "$*" >&2; exit 1; }
+ok()    { printf "${G}[✓]${N} %s\n" "$*"; }
+info()  { printf "${B}[·]${N} %s\n" "$*"; }
+warn()  { printf "${Y}[!]${N} %s\n" "$*"; }
+die()   { printf "${R}[✗]${N} %s\n" "$*" >&2; exit 1; }
 
 # ── pre-flight ───────────────────────────────────────────────────────
-command -v curl >/dev/null 2>&1 || die "curl not found.  Run: pkg install curl"
-[ -d "$GLIBC_PREFIX" ]         || die "glibc not found.  Run: pkg install glibc-repo && pkg install glibc"
+# Prüfe auf curl
+if ! command -v curl >/dev/null 2>&1; then
+    info "Installing curl..."
+    pkg install -y curl || die "Failed to install curl"
+fi
+
+# Automatische glibc Installation, falls nicht vorhanden
+if [ ! -d "$GLIBC_PREFIX" ]; then
+    info "glibc not found. Installing glibc-repo and glibc automatically..."
+    pkg update -y || warn "pkg update failed, attempting to continue..."
+    pkg install -y glibc-repo || die "Failed to install glibc-repo"
+    pkg install -y glibc || die "Failed to install glibc"
+    ok "glibc installed successfully."
+fi
 
 # ── libc.so symlink fix ─────────────────────────────────────────────
 fix_libc() {
@@ -42,7 +51,6 @@ dl() {
 }
 
 # ── checksum verification ────────────────────────────────────────────
-# When SHA256SUMS is available, verify downloaded files.
 verify() {
     local file="$1"
     if [ -f SHA256SUMS ] && command -v sha256sum >/dev/null 2>&1; then
@@ -63,7 +71,7 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 cd "$tmpdir"
 
-# Try to fetch checksums (non-fatal if unavailable)
+# Try to fetch checksums
 curl -fsSL -o SHA256SUMS "$BASE/SHA256SUMS" 2>/dev/null || true
 
 # 1) bionilux binary
@@ -82,7 +90,7 @@ ok "preload  → $GLIBC_PREFIX/lib/"
 dl box64 box64
 verify box64
 install -m 755 box64 "$PREFIX/bin/box64"
-ok "box64    → $PREFIX/bin/"
+ok "box64     → $PREFIX/bin/"
 
 # 4) x86_64 compat libs
 dl x86_64-linux-gnu.tar.gz x86_64-linux-gnu.tar.gz
@@ -96,6 +104,6 @@ mkdir -p "$GLIBC_PREFIX/bin"
 
 # ── done ─────────────────────────────────────────────────────────────
 printf "\n${G}  ✓ bionilux v${VERSION} installed${N}\n\n"
-printf "  ${Y}bionilux <binary> [args...]${N}     Run a binary\n"
+printf "  ${Y}bionilux <binary> [args...]${N}      Run a binary\n"
 printf "  ${Y}bionilux -d <binary>${N}            Debug mode\n"
-printf "  ${Y}bionilux --version${N}              Version info\n\n"
+printf "  ${Y}bionilux --version${N}               Version info\n\n"
