@@ -162,11 +162,15 @@ ok "Built ovgl ($(wc -c < ovgl) bytes)"
 # ── step 4: verify ──────────────────────────────────────────────────
 info "Step 4: Verifying..."
 
-printf "\n${BLUE}libovgl_preload.so:${NC}\n"
-file libovgl_preload.so
-
-printf "\n${BLUE}ovgl:${NC}\n"
-file ovgl
+if command -v file >/dev/null 2>&1; then
+    printf "\n${BLUE}libovgl_preload.so:${NC}\n"
+    file libovgl_preload.so
+    printf "\n${BLUE}ovgl:${NC}\n"
+    file ovgl
+else
+    info "libovgl_preload.so: $(wc -c < libovgl_preload.so) bytes"
+    info "ovgl: $(wc -c < ovgl) bytes"
+fi
 
 # ── step 5: install ─────────────────────────────────────────────────
 info "Step 5: Installing..."
