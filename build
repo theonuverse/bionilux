@@ -77,16 +77,16 @@ info "Step 0: x86_64 libraries"
 if [ -d "$X86_LIB_DIR" ] && [ -n "$(ls -A "$X86_LIB_DIR" 2>/dev/null)" ]; then
     info "Already present — skipping"
 else
-    info "Downloading from $RELEASE_URL/lib_x86_64.tar.gz ..."
+    info "Downloading from $RELEASE_URL/x86_64-linux-gnu.tar.gz ..."
     tmpdir="$(mktemp -d)"
     trap 'rm -rf "$tmpdir"' EXIT
 
-    curl -fSL --progress-bar -o "$tmpdir/lib_x86_64.tar.gz" \
-        "$RELEASE_URL/lib_x86_64.tar.gz" \
+    curl -fSL --progress-bar -o "$tmpdir/x86_64-linux-gnu.tar.gz" \
+        "$RELEASE_URL/x86_64-linux-gnu.tar.gz" \
         || die "Download failed"
 
     mkdir -p "$X86_LIB_DIR"
-    tar xzf "$tmpdir/lib_x86_64.tar.gz" --strip-components=1 -C "$X86_LIB_DIR" \
+    tar xzf "$tmpdir/x86_64-linux-gnu.tar.gz" --strip-components=1 -C "$X86_LIB_DIR" \
         || die "Extraction failed"
 
     rm -rf "$tmpdir"

@@ -66,9 +66,9 @@ install -m 755 box64 "$PREFIX/bin/box64"
 ok "box64    → $PREFIX/bin/"
 
 # 4) x86_64 compat libs
-dl lib_x86_64.tar.gz lib_x86_64.tar.gz
+dl x86_64-linux-gnu.tar.gz x86_64-linux-gnu.tar.gz
 mkdir -p "$GLIBC_PREFIX/lib/x86_64-linux-gnu"
-tar xzf lib_x86_64.tar.gz --strip-components=1 -C "$GLIBC_PREFIX/lib/x86_64-linux-gnu"
+tar xzf x86_64-linux-gnu.tar.gz --strip-components=1 -C "$GLIBC_PREFIX/lib/x86_64-linux-gnu"
 ok "x86_64   → $GLIBC_PREFIX/lib/x86_64-linux-gnu/"
 
 # 5) box64 wrapper (glibc bin dir)
