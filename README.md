@@ -1,42 +1,27 @@
 # ovgl
 
-**ovgl** (onuverse Glibc Loader) runs **unpatched** glibc ARM64 and x86_64 binaries on Termux **without proot or any container**.
+**ovgl** (onuverse Glibc Loader) runs **unpatched** glibc ARM64 and x86\_64 binaries on Termux — no proot, no container.
 
 ---
 
 ## Overview
 
-Termux on Android uses **Bionic libc** (Android's C library), but many Linux binaries are compiled against **glibc** (GNU C Library). These binaries won't run directly on Termux because:
+Termux uses Android's **Bionic libc**, but most Linux binaries are built against **glibc**.
+They fail on Termux because:
 
-1. The ELF interpreter path (`/lib/ld-linux-aarch64.so.1`) doesn't exist on Android
-2. Android's kernel execve() syscall fails to find the interpreter
-3. Even if you invoke the loader manually, child processes spawned by the binary will fail
+1. The ELF interpreter (`/lib/ld-linux-aarch64.so.1`) does not exist on Android.
+2. The kernel's `execve()` cannot resolve it, returning *ENOENT*.
+3. Even invoking the loader manually breaks child processes and `/proc/self/exe`.
 
-**ovgl** solves all these problems by:
-- Invoking the glibc dynamic linker directly
-- Intercepting `execve()` calls to redirect child processes through the glibc loader
-- Fixing `/proc/self/exe` so binaries can find their resources
+**ovgl** fixes all three problems:
 
----
+- Invokes the glibc dynamic linker directly.
+- Intercepts `execve()` in child processes via an `LD_PRELOAD` library so they are
+  transparently re-routed through the loader.
+- Hooks `readlink("/proc/self/exe")` so binaries can locate their own resources.
 
-## Table of Contents
-
-- [Overview](#overview)
-- [How It Works](#how-it-works)
-- [Complete Setup Guide](#complete-setup-guide)
-  - [Step 1: Update Termux](#step-1-update-termux)
-  - [Step 2: Install Required Packages](#step-2-install-required-packages)
-  - [Step 3: Fix glibc libc.so Symlink](#step-3-fix-glibc-libcso-symlink)
-  - [Step 4: Install ovgl](#step-4-install-ovgl)
-  - [Step 5: Build ovgl](#step-5-build-ovgl)
-  - [Step 6: Configure Shell](#step-6-configure-shell)
-- [Usage](#usage)
-- [Example: Running Geekbench 6](#example-running-geekbench-6)
-- [Environment Variables](#environment-variables)
-- [Technical Details](#technical-details)
-- [Troubleshooting](#troubleshooting)
-- [The Problem ovgl Solves](#the-problem-ovgl-solves)
-- [License](#license)
+For **x86\_64** binaries ovgl additionally chains through
+[box64](https://github.com/ptitSeb/box64) for user-space emulation.
 
 ## How It Works
 
@@ -44,161 +29,161 @@ Termux on Android uses **Bionic libc** (Android's C library), but many Linux bin
 
 ## Installation
 
-You have two installation options:
-
-- Option 1 — Quick installer (recommended): download a prebuilt release and install automatically
-- Option 2 — From source using `git` (build locally)
-
-### Option 1 — Quick installer (curl)
-
-Run the installer which downloads prebuilt `ovgl`, `box64`, and optional x86_64 libraries from the v0.0.1 release:
+### Option 1 — Quick installer (recommended)
 
 ```bash
 curl -sL https://theonuverse.github.io/ovgl/setup | bash
 ```
 
-What the installer does:
+The installer:
 
-- Updates packages (`pkg up`)
-- Installs `glibc-repo`, `glibc`, and `wget`
-- Fixes the `libc.so` symlink required by some glibc packages
-- Downloads and installs `ovgl` to `$PREFIX/bin/`
-- Downloads and installs `box64` to `$PREFIX/bin/` (if available)
-- Extracts `x86_64` runtime libraries into `$PREFIX/glibc/lib_x86_64/` (if the archive exists)
-- Downloads and installs the preload library to `$PREFIX/glibc/lib/`
+- Runs `pkg up` and installs `glibc-repo`, `glibc`, `curl`.
+- Fixes the `libc.so` linker-script symlink.
+- Downloads `ovgl`, `box64`, the preload library and x86\_64 runtime
+  libraries from the **v0.2.0** release.
 
-### Option 2 — Build from source (git)
-
-If you prefer building locally:
+### Option 2 — Build from source
 
 ```bash
 yes | pkg up
-pkg ins glibc-repo clang -y
-pkg ins glibc file git wget -y
-cd ~ && git clone https://github.com/theonuverse/ovgl.git
+pkg install glibc-repo clang curl -y
+pkg install glibc file git -y
+cd ~
+git clone https://github.com/theonuverse/ovgl.git
 cd ovgl
-./build
+./build            # compile + install
+./build -c         # clean reinstall (removes old artefacts first)
 ```
 
-The build script automatically installs `ovgl` to `$PREFIX/bin/` and `libovgl_preload.so` to `$PREFIX/glibc/lib/`.
+The build script installs:
+
+| Artefact | Destination |
+|----------|-------------|
+| `ovgl` | `$PREFIX/bin/` |
+| `libovgl_preload.so` | `$PREFIX/glibc/lib/` |
+| x86\_64 compat libs | `$PREFIX/glibc/lib/x86_64-linux-gnu/` |
 
 ## Usage
 
+```
+ovgl [options] [--] <binary> [args ...]
+```
+
+Use `--` to separate ovgl flags from the binary's flags:
+
 ```bash
-ovgl <binary> [args...]
+ovgl -- ./program --help
 ```
 
 ### Options
 
 | Flag | Description |
 |------|-------------|
-| `-d, --debug` | Show debug output |
-| `-n, --no-preload` | Disable preload library |
-| `-h, --help` | Show help |
-| `-v, --version` | Show version |
+| `-d`, `--debug` | Verbose debug output |
+| `-n`, `--no-preload` | Do not inject the preload library |
+| `-h`, `--help` | Show help text |
+| `-v`, `--version` | Print version |
 
 ### Examples
 
 ```bash
-# Run arm64 glibc binary
+# ARM64 glibc binary
 ovgl ./geekbench6
 
-# Run x86_64 binary (uses box64 automatically)
+# x86_64 binary (box64 is selected automatically)
 ovgl ./bedrock_server
 
 # Debug mode
 ovgl -d ./myapp
 
-# Run without preload (for simple binaries)
-ovgl -n ./simple_app
+# Without preload (simple static binaries)
+ovgl -n ./static_hello
 ```
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BOX64_LD_LIBRARY_PATH` | `$PREFIX/glibc/lib_x86_64` | x86_64 library search path |
-| `OVGL_GLIBC_LIB` | `$PREFIX/glibc/lib` | glibc library path |
-| `OVGL_GLIBC_LOADER` | `$PREFIX/glibc/lib/ld-linux-aarch64.so.1` | glibc loader |
-| `OVGL_DEBUG` | unset | Set to `1` to enable debug output |
-| `OVGL_ORIG_EXE` | (internal) | Original executable path for /proc/self/exe fix |
+| `BOX64_LD_LIBRARY_PATH` | `$PREFIX/glibc/lib/x86_64-linux-gnu` | x86\_64 library search path |
+| `OVGL_GLIBC_LIB` | `$PREFIX/glibc/lib` | glibc ARM64 library path |
+| `OVGL_GLIBC_LOADER` | `$PREFIX/glibc/lib/ld-linux-aarch64.so.1` | glibc dynamic linker |
+| `OVGL_DEBUG` | *(unset)* | Set to `1` for debug output |
+| `OVGL_ORIG_EXE` | *(internal)* | Original binary path for `/proc/self/exe` fix |
 
 ## Example: Running Geekbench 6
 
 ```bash
 cd ~
-wget https://cdn.geekbench.com/Geekbench-6.5.0-LinuxARMPreview.tar.gz
-tar -xvf Geekbench-6.5.0-LinuxARMPreview.tar.gz
+curl -fLO https://cdn.geekbench.com/Geekbench-6.5.0-LinuxARMPreview.tar.gz
+tar xf Geekbench-6.5.0-LinuxARMPreview.tar.gz
 cd Geekbench-6.5.0-LinuxARMPreview
-
-# Run without any patching!
 ovgl ./geekbench6
 ```
 
 ## Technical Details
 
-### Hooked Functions
+### ELF Detection
+
+ovgl uses `pread()` to inspect an ELF binary **without** loading the entire file:
+
+1. Read the ELF header — verify magic, class (64-bit), and machine (aarch64 / x86\_64).
+2. Walk `PT_INTERP` program headers to extract the interpreter path.
+3. Classify the interpreter: **glibc** (`ld-linux`), **bionic** (`linker64`), or **musl** (`ld-musl`).
+4. Musl binaries are rejected (they are incompatible with a glibc loader).
+
+### Hooked Functions (preload library)
 
 | Function | Purpose |
 |----------|---------|
-| `execve()` | Main exec hook - rewrites glibc binary execution |
-| `execv()` | Wrapper, calls execve() |
-| `execvp()` | PATH resolution + execve() |
-| `execvpe()` | PATH resolution + execve() with custom envp |
-| `readlink()` | Fixes `/proc/self/exe` |
-| `readlinkat()` | Fixes `/proc/self/exe` (fd variant) |
-
-### ELF Detection
-
-1. Check ELF magic bytes (`\x7fELF`)
-2. Verify 64-bit ELF (`ELFCLASS64`)
-3. Check architecture (aarch64 or x86_64)
-4. Find `PT_INTERP` program header
-5. Detect interpreter type (glibc, bionic, musl)
+| `execve()` | Re-routes glibc binaries through the loader |
+| `execv()` | Wrapper → `execve()` |
+| `execvp()` | PATH resolution + `execve()` |
+| `execvpe()` | PATH resolution + `execve()` with custom envp |
+| `readlink()` | Returns `OVGL_ORIG_EXE` for `/proc/self/exe` |
+| `readlinkat()` | Same fix using `fd` + path |
 
 ## Troubleshooting
 
 ### "Binary not found"
 
-ovgl searches the current directory first, then PATH:
+ovgl searches `$PATH` only (it does **not** search the current directory implicitly).
+Always use an explicit path:
 
 ```bash
-# These all work:
-ovgl ./program
-ovgl program      # if in current directory
-ovgl /full/path/to/program
+ovgl ./program          # relative
+ovgl /full/path/program # absolute
 ```
 
-### Child process fails
+### Child processes crash or hang
 
-Enable debug mode to see what's happening:
+Enable debug mode to trace the preload library's decisions:
 
 ```bash
 ovgl -d ./program
 ```
 
-### Missing x86_64 libraries
+### Missing x86\_64 libraries
 
-For x86_64 binaries, ensure libraries are in `$PREFIX/glibc/lib_x86_64/`:
+Ensure the compat libraries are present:
 
 ```bash
-ls $PREFIX/glibc/lib_x86_64/
-# Should contain: libgcc_s.so.1, libstdc++.so.6, etc.
+ls "$PREFIX/glibc/lib/x86_64-linux-gnu/"
+# Expected: libgcc_s.so.1  libstdc++.so.6  libssl.so.1.1 …
 ```
 
-## The Problem ovgl Solves
+If they are missing, re-run the build script or download them manually into
+`$PREFIX/glibc/lib/x86_64-linux-gnu/`.
 
-Running glibc binaries on Android/Termux is challenging because:
+## Testing
 
-- **Interpreter Path Issue**: glibc binaries expect `/lib/ld-linux-aarch64.so.1`, but Android doesn't have this path
-- **Kernel execve() Failure**: Android's kernel can't find the glibc interpreter, causing "No such file or directory" errors
-- **Child Process Problems**: Even if you manually invoke the loader, child processes spawned by the binary will fail because they inherit the wrong environment
-- **Resource Location**: Binaries that read `/proc/self/exe` to find their resources fail because the path points to the loader instead of the binary
+After building, run the included smoke test:
 
-ovgl addresses all these issues with a comprehensive solution that works for both ARM64 glibc and x86_64 binaries.
+```bash
+./test_smoke.sh
+```
 
 ## License
 
-MIT License - Copyright (c) 2026 onuverse
+MIT — see [LICENSE](LICENSE) for details.
 
 

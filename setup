@@ -1,163 +1,139 @@
 #!/bin/bash
-set -e
-
-# Modular installer for ovgl
+# SPDX-License-Identifier: MIT
+#
+# ovgl quick installer (v0.2.0)
 # Usage: curl -sL https://theonuverse.github.io/ovgl/setup | bash
+#
+set -eu
 
-PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
-RELEASE_BASE="https://github.com/theonuverse/ovgl/releases/download/v0.0.1"
+readonly VERSION="0.2.0"
+readonly PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+readonly GLIBC_PREFIX="$PREFIX/glibc"
+readonly RELEASE_BASE="https://github.com/theonuverse/ovgl/releases/download/v${VERSION}"
 
-# Colors
+# -- colours -----------------------------------------------------------------
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-info(){ printf "${GREEN}[INFO]${NC} %s\n" "$1"; }
-warn(){ printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
-err(){ printf "${RED}[ERROR]${NC} %s\n" "$1"; }
+info()  { printf "${GREEN}[INFO]${NC} %s\n" "$1"; }
+warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
+err()   { printf "${RED}[ERROR]${NC} %s\n" "$1"; }
+die()   { err "$1"; exit 1; }
 
-die(){ err "$1"; exit 1; }
+# -- helpers -----------------------------------------------------------------
 
-print_header(){
-	printf "${BLUE}+-----------------------------------+${NC}\n"
-	printf "${BLUE}|   ovgl Quick Installer (v0.0.1)   |\n${NC}"
-	printf "${BLUE}+-----------------------------------+${NC}\n\n"
+print_header() {
+	printf "\n"
+	printf "${BLUE}+------------------------------------+${NC}\n"
+	printf "${BLUE}|   ovgl Quick Installer  (v%s)   |${NC}\n" "$VERSION"
+	printf "${BLUE}+------------------------------------+${NC}\n\n"
 }
 
-ensure_pkg(){
-	info "Updating packages..."
+ensure_packages() {
+	info "Updating packages ..."
 	yes | pkg up >/dev/null 2>&1 || warn "pkg up returned non-zero"
 
-	info "Installing required packages: glibc-repo, glibc, wget"
+	info "Installing required packages: glibc-repo glibc curl"
 	pkg install glibc-repo -y >/dev/null 2>&1 || die "Failed to install glibc-repo"
-	pkg install glibc wget -y >/dev/null 2>&1 || die "Failed to install glibc or wget"
+	pkg install glibc curl   -y >/dev/null 2>&1 || die "Failed to install glibc or curl"
 }
 
-fix_libc_symlink(){
-	GLIBC_LIB="$PREFIX/glibc/lib"
-	if [ -f "$GLIBC_LIB/libc.so" ] && [ ! -L "$GLIBC_LIB/libc.so" ]; then
-		info "Backing up existing libc.so and creating symlink to libc.so.6"
-		mv "$GLIBC_LIB/libc.so" "$GLIBC_LIB/libc.so.script" || warn "Couldn't move libc.so"
+fix_libc_symlink() {
+	local lib="$GLIBC_PREFIX/lib"
+
+	if [ -f "$lib/libc.so" ] && [ ! -L "$lib/libc.so" ]; then
+		info "Backing up linker script libc.so -> libc.so.script"
+		mv "$lib/libc.so" "$lib/libc.so.script" || warn "Could not move libc.so"
 	fi
-	if [ ! -L "$GLIBC_LIB/libc.so" ]; then
-		ln -s "$GLIBC_LIB/libc.so.6" "$GLIBC_LIB/libc.so" || warn "Couldn't create libc.so symlink"
+
+	if [ ! -L "$lib/libc.so" ]; then
+		ln -sf libc.so.6 "$lib/libc.so" || warn "Could not create libc.so symlink"
 	fi
 }
 
-download_and_verify(){
-	# $1 = url_path (relative to RELEASE_BASE)
-	# $2 = dest filename
-	# $3 = optional sha256 value (hex)
+# download URL DEST [SHA256]
+download() {
 	local url="$RELEASE_BASE/$1"
 	local dest="$2"
-	local want_sha="$3"
+	local want="${3:-}"
 
-	info "Downloading $dest..."
-	if ! wget -qO "$dest" "$url"; then
+	info "Downloading $1 ..."
+	if ! curl -fsSL -o "$dest" "$url"; then
 		warn "Failed to download $url"
 		return 1
 	fi
 
-	if [ -n "$want_sha" ]; then
-		if command -v sha256sum >/dev/null 2>&1; then
-			local got
-			got=$(sha256sum "$dest" | awk '{print $1}')
-			if [ "$got" != "$want_sha" ]; then
-				rm -f "$dest"
-				die "Checksum mismatch for $dest"
-			else
-				info "Checksum OK for $dest"
-			fi
-		else
-			warn "sha256sum not available; skipping checksum for $dest"
+	if [ -n "$want" ] && command -v sha256sum >/dev/null 2>&1; then
+		local got
+		got=$(sha256sum "$dest" | awk '{print $1}')
+		if [ "$got" != "$want" ]; then
+			rm -f "$dest"
+			die "Checksum mismatch for $dest (expected $want, got $got)"
 		fi
-	fi
-	return 0
-}
-
-install_binary(){
-	# $1 = filename in cwd
-	# $2 = target path (optional)
-	local src="$1"
-	local tgt="${2:-$PREFIX/bin/}"
-	chmod +x "$src" || warn "chmod failed on $src"
-	cp "$src" "$tgt" || die "Failed to copy $src to $tgt"
-	info "Installed $src to $tgt"
-}
-
-install_x86_libs(){
-	local archive="$1"
-	if [ -f "$archive" ]; then
-		mkdir -p "$PREFIX/glibc/lib_x86_64"
-		tar -xzf "$archive" -C "$PREFIX/glibc/lib_x86_64" || warn "Failed to extract x86_64 libs"
-		info "Installed x86_64 libs to $PREFIX/glibc/lib_x86_64"
-	else
-		warn "No x86_64 libs archive present"
+		info "Checksum OK: $dest"
 	fi
 }
 
-main(){
+# -- main --------------------------------------------------------------------
+
+main() {
 	print_header
-	ensure_pkg
+	ensure_packages
 	fix_libc_symlink
 
+	# Work in a temporary directory, cleaned up on exit.
 	local tmpdir
 	tmpdir=$(mktemp -d)
+	trap 'rm -rf "$tmpdir"' EXIT
 	cd "$tmpdir"
 
-	# Example: checksums can be provided here. For v0.0.1 we don't have published checksums,
-	# but the structure supports adding them later.
-	local ovgl_sha=""
-	local box64_sha=""
-	local libs_sha=""
+	# -- ovgl binary --
+	download ovgl ovgl
+	install -m 755 ovgl "$PREFIX/bin/ovgl"
+	info "Installed ovgl to $PREFIX/bin/"
 
-	if download_and_verify "ovgl" ovgl "$ovgl_sha"; then
-		install_binary ovgl
+	# -- box64 --
+	if download box64 box64; then
+		install -m 755 box64 "$PREFIX/bin/box64"
+		info "Installed box64 to $PREFIX/bin/"
 	else
-		die "ovgl download failed"
+		warn "box64 not installed (download failed)"
 	fi
 
-	if download_and_verify "box64" box64 "$box64_sha"; then
-		install_binary box64
+	# -- x86_64 compatibility libraries --
+	local libdir="$GLIBC_PREFIX/lib/x86_64-linux-gnu"
+	mkdir -p "$libdir"
+
+	if download lib_x86_64.tar.gz lib_x86_64.tar.gz; then
+		tar -xzf lib_x86_64.tar.gz --strip-components=1 -C "$libdir"
+		info "Installed x86_64 libs to $libdir"
 	else
-		warn "box64 not installed"
+		warn "x86_64 libs not installed; populate $libdir manually"
 	fi
 
-	if download_and_verify "lib_x86_64.tar.gz" lib_x86_64.tar.gz "$libs_sha"; then
-		install_x86_libs lib_x86_64.tar.gz
+	# -- preload library --
+	if download libovgl_preload.so libovgl_preload.so; then
+		install -m 755 libovgl_preload.so "$GLIBC_PREFIX/lib/libovgl_preload.so"
+		info "Installed preload library to $GLIBC_PREFIX/lib/"
 	else
-		warn "x86_64 libs archive not found; you can populate $PREFIX/glibc/lib_x86_64 manually"
+		warn "Preload library not found; ovgl will extract its embedded copy"
 	fi
 
-	# Create $PREFIX/glibc/bin directory for box64 wrapper
-	mkdir -p "$PREFIX/glibc/bin"
+	# -- glibc bin dir (for box64 wrapper) --
+	mkdir -p "$GLIBC_PREFIX/bin"
 
-	# Download preload library to $PREFIX/glibc/lib/
-	if download_and_verify "libovgl_preload.so" libovgl_preload.so ""; then
-		cp libovgl_preload.so "$PREFIX/glibc/lib/"
-		chmod +x "$PREFIX/glibc/lib/libovgl_preload.so"
-		info "Installed preload library to $PREFIX/glibc/lib/"
-	else
-		warn "Preload library not found; ovgl will extract embedded version on first run"
-	fi
-
-	# Cleanup
-	cd - >/dev/null 2>&1 || true
-	rm -rf "$tmpdir"
-
-	printf "\n${GREEN}+-----------------------------------+${NC}\n"
-	printf "${GREEN}Installation complete!${NC}\n"
-	printf "${GREEN}ovgl and box64 (if available) are installed to: ${YELLOW}$PREFIX/bin/${NC}\n"
-	printf "${GREEN}x86_64 libraries (if available) are in: ${YELLOW}$PREFIX/glibc/lib_x86_64${NC}\n"
-	printf "${GREEN}+-----------------------------------+${NC}\n\n"
-
-	printf "${BLUE}Next steps:${NC}\n"
-	printf "  - Ensure $PREFIX/bin is in your PATH\n"
-	printf "  - Run: ovgl <binary> [args...]\n"
-
-	exit 0
+	# -- done ----------------------------------------------------------------
+	printf "\n"
+	printf "${GREEN}+------------------------------------+${NC}\n"
+	printf "${GREEN}|        Installation complete       |${NC}\n"
+	printf "${GREEN}+------------------------------------+${NC}\n\n"
+	printf "  ovgl / box64  : ${YELLOW}%s/bin/${NC}\n" "$PREFIX"
+	printf "  x86_64 libs   : ${YELLOW}%s${NC}\n" "$libdir"
+	printf "  preload       : ${YELLOW}%s/lib/libovgl_preload.so${NC}\n\n" "$GLIBC_PREFIX"
+	printf "${BLUE}Run:${NC}  ovgl <binary> [args ...]\n\n"
 }
 
 main "$@"
