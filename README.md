@@ -110,13 +110,13 @@ bionilux -n ./static_hello
 | `BIONILUX_DEBUG` | *(unset)* | Set to `1` for debug output |
 | `BIONILUX_ORIG_EXE` | *(internal)* | Original binary path for `/proc/self/exe` fix |
 
-## Example: Running Geekbench 6
+## Example: Running Geekbench 6 for ARM
 
 ```bash
 cd ~
-curl -fLO https://cdn.geekbench.com/Geekbench-6.5.0-LinuxARMPreview.tar.gz
-tar xf Geekbench-6.5.0-LinuxARMPreview.tar.gz
-cd Geekbench-6.5.0-LinuxARMPreview
+curl -fLO https://cdn.geekbench.com/Geekbench-6.6.0-LinuxARMPreview.tar.gz
+tar xf Geekbench-6.6.0-LinuxARMPreview.tar.gz
+cd Geekbench-6.6.0-LinuxARMPreview
 bionilux ./geekbench6
 ```
 
@@ -173,14 +173,6 @@ ls "$PREFIX/glibc/lib/x86_64-linux-gnu/"
 
 If they are missing, re-run the build script or download them manually into
 `$PREFIX/glibc/lib/x86_64-linux-gnu/`.
-
-## Testing
-
-After building, run the included smoke test:
-
-```bash
-./test_smoke.sh
-```
 
 ## License
 
