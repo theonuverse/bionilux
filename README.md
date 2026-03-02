@@ -37,23 +37,25 @@ curl -sL https://theonuverse.github.io/bionilux/setup | bash
 
 The installer:
 
-- Runs `pkg up` and installs `glibc-repo`, `glibc`, `curl`.
+- Installs `binutils`, `glibc-repo`, `clang`, `curl`, `file`, `git`, and `glibc`.
 - Fixes the `libc.so` linker-script symlink.
-- Downloads `bionilux`, `box64`, the preload library and x86\_64 runtime
-  libraries from the **v0.2.0** release.
+- Downloads `bionilux` and the preload library from the **v0.2.0** release.
+- Fetches `box64` from [Pi-Apps-Coders/box64-debs](https://github.com/Pi-Apps-Coders/box64-debs).
+- Fetches x86\_64 runtime libraries from [easycli.sh](https://easycli.sh/proot-distro/).
 
 ### Option 2 — Build from source
 
 ```bash
-yes | pkg up
-pkg install glibc-repo clang curl -y
-pkg install glibc file git -y
-cd ~
 git clone https://github.com/theonuverse/bionilux.git
 cd bionilux
-./build            # compile + install
+./build            # compile + install (auto-installs all dependencies)
 ./build -c         # clean reinstall (removes old artefacts first)
 ```
+
+The only prerequisite is `git` (to clone the repo). The build script
+automatically installs `binutils`, `glibc-repo`, `clang`, `curl`, `file`,
+`git`, and `glibc`, then fetches `box64` and x86\_64 runtime libraries
+from upstream before compiling.
 
 The build script installs:
 
@@ -61,6 +63,7 @@ The build script installs:
 |----------|-------------|
 | `bionilux` | `$PREFIX/bin/` |
 | `libbionilux_preload.so` | `$PREFIX/glibc/lib/` |
+| `box64` | `$PREFIX/bin/` |
 | x86\_64 compat libs | `$PREFIX/glibc/lib/x86_64-linux-gnu/` |
 
 ## Usage

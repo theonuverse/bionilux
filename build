@@ -14,7 +14,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VERSION="0.2.0"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 GLIBC_PREFIX="$PREFIX/glibc"
-RELEASE_URL="https://github.com/theonuverse/bionilux/releases/download/v${VERSION}"
 
 X86_LIB_DIR="$GLIBC_PREFIX/lib/x86_64-linux-gnu"
 BOX64_DEST="$PREFIX/bin/box64"
@@ -66,11 +65,17 @@ if [ "${1:-}" = "-c" ] || [ "${1:-}" = "--clean" ] || [ "${1:-}" = "--clean-rein
 fi
 
 # ── prerequisites ────────────────────────────────────────────────────
-command -v clang  >/dev/null 2>&1 || die "clang not found.  Run: pkg install clang"
-command -v curl   >/dev/null 2>&1 || die "curl not found.   Run: pkg install curl"
-[ -d "$GLIBC_PREFIX" ]           || die "glibc not found.  Run: pkg install glibc-repo && pkg install glibc"
+info "Checking prerequisites..."
+pkg update -y || warn "pkg update failed, attempting to continue..."
+pkg install -y binutils glibc-repo clang curl file git \
+    || die "Failed to install prerequisites"
+pkg install -y glibc || die "Failed to install glibc"
 
 fix_libc_symlink
+
+# ── temporary directory ──────────────────────────────────────────────
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
 
 # ── step 0: x86_64 libraries ────────────────────────────────────────
 info "Step 0: x86_64 libraries"
@@ -78,20 +83,31 @@ info "Step 0: x86_64 libraries"
 if [ -d "$X86_LIB_DIR" ] && [ -n "$(ls -A "$X86_LIB_DIR" 2>/dev/null)" ]; then
     info "Already present — skipping"
 else
-    info "Downloading from $RELEASE_URL/x86_64-linux-gnu.tar.gz ..."
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
+    info "Fetching latest x86_64 library archive name..."
+    ARCHIVE_NAME=$(curl -fsSL https://easycli.sh/proot-distro/ \
+        | grep -oP 'debian-trixie-x86_64-pd-v\d+\.\d+\.\d+\.tar\.xz' \
+        | sort -V | tail -n 1) \
+        || die "Failed to find x86_64 archive"
+    [ -n "$ARCHIVE_NAME" ] || die "No x86_64 archive found"
 
-    curl -fSL --progress-bar -o "$tmpdir/x86_64-linux-gnu.tar.gz" \
-        "$RELEASE_URL/x86_64-linux-gnu.tar.gz" \
-        || die "Download failed"
+    info "Downloading $ARCHIVE_NAME ..."
+    curl -fSL --progress-bar -o "$tmpdir/$ARCHIVE_NAME" \
+        "https://easycli.sh/proot-distro/$ARCHIVE_NAME" \
+        || die "Download failed: $ARCHIVE_NAME"
 
     mkdir -p "$X86_LIB_DIR"
-    tar xzf "$tmpdir/x86_64-linux-gnu.tar.gz" --strip-components=1 -C "$X86_LIB_DIR" \
+    tar --exclude='engines-3' \
+        --exclude='gconv' \
+        --exclude='ossl-modules' \
+        --exclude='perl-base' \
+        --exclude='security' \
+        -xf "$tmpdir/$ARCHIVE_NAME" \
+        --strip-components=4 \
+        -C "$X86_LIB_DIR" \
+        debian-trixie-x86_64/usr/lib/x86_64-linux-gnu \
         || die "Extraction failed"
 
-    rm -rf "$tmpdir"
-    trap - EXIT
+    rm -f "$tmpdir/$ARCHIVE_NAME"
     ok "Installed x86_64 libs → $X86_LIB_DIR"
 fi
 
@@ -101,10 +117,25 @@ info "Checking box64..."
 if [ -x "$BOX64_DEST" ]; then
     info "Already present — skipping"
 else
-    info "Downloading from $RELEASE_URL/box64 ..."
-    curl -fSL --progress-bar -o "$BOX64_DEST" "$RELEASE_URL/box64" \
-        || die "Download failed"
-    chmod 755 "$BOX64_DEST"
+    info "Fetching latest box64 .deb name..."
+    DEB_NAME=$(curl -fsSL https://api.github.com/repos/Pi-Apps-Coders/box64-debs/contents/debian \
+        | grep -oP 'box64-android_[^ "]+?_arm64\.deb' \
+        | sort -V | tail -n 1) \
+        || die "Failed to query box64 releases"
+    [ -n "$DEB_NAME" ] || die "No box64 .deb found"
+
+    info "Downloading $DEB_NAME ..."
+    curl -fSL --progress-bar -o "$tmpdir/box64.deb" \
+        "https://github.com/Pi-Apps-Coders/box64-debs/raw/master/debian/$DEB_NAME" \
+        || die "Download failed: $DEB_NAME"
+
+    dpkg-deb -x "$tmpdir/box64.deb" "$tmpdir/box64_out" \
+        || die "Failed to extract box64 .deb"
+
+    install -m 755 "$tmpdir/box64_out/usr/local/bin/box64" "$BOX64_DEST" \
+        || die "Failed to install box64"
+
+    rm -rf "$tmpdir/box64.deb" "$tmpdir/box64_out"
     ok "Installed box64 → $BOX64_DEST"
 fi
 

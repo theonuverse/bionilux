@@ -19,20 +19,12 @@ warn()  { printf "${Y}[!]${N} %s\n" "$*"; }
 die()   { printf "${R}[✗]${N} %s\n" "$*" >&2; exit 1; }
 
 # ── pre-flight ───────────────────────────────────────────────────────
-# Prüfe auf curl
-if ! command -v curl >/dev/null 2>&1; then
-    info "Installing curl..."
-    pkg install -y curl || die "Failed to install curl"
-fi
-
-# Automatische glibc Installation, falls nicht vorhanden
-if [ ! -d "$GLIBC_PREFIX" ]; then
-    info "glibc not found. Installing glibc-repo and glibc automatically..."
-    pkg update -y || warn "pkg update failed, attempting to continue..."
-    pkg install -y glibc-repo || die "Failed to install glibc-repo"
-    pkg install -y glibc || die "Failed to install glibc"
-    ok "glibc installed successfully."
-fi
+info "Checking prerequisites..."
+pkg update -y || warn "pkg update failed, attempting to continue..."
+pkg install -y binutils glibc-repo clang curl file git \
+    || die "Failed to install prerequisites"
+pkg install -y glibc || die "Failed to install glibc"
+ok "Prerequisites installed."
 
 # ── libc.so symlink fix ─────────────────────────────────────────────
 fix_libc() {
@@ -87,16 +79,49 @@ install -m 755 libbionilux_preload.so "$GLIBC_PREFIX/lib/libbionilux_preload.so"
 ok "preload  → $GLIBC_PREFIX/lib/"
 
 # 3) box64
-dl box64 box64
-verify box64
-install -m 755 box64 "$PREFIX/bin/box64"
+info "Fetching latest box64 .deb name..."
+DEB_NAME=$(curl -fsSL https://api.github.com/repos/Pi-Apps-Coders/box64-debs/contents/debian \
+    | grep -oP 'box64-android_[^ "]+?_arm64\.deb' \
+    | sort -V | tail -n 1) \
+    || die "Failed to query box64 releases"
+[ -n "$DEB_NAME" ] || die "No box64 .deb found"
+
+info "Downloading $DEB_NAME ..."
+curl -fSL --progress-bar -o box64.deb \
+    "https://github.com/Pi-Apps-Coders/box64-debs/raw/master/debian/$DEB_NAME" \
+    || die "Download failed: $DEB_NAME"
+
+dpkg-deb -x box64.deb box64_out || die "Failed to extract box64 .deb"
+install -m 755 box64_out/usr/local/bin/box64 "$PREFIX/bin/box64" \
+    || die "Failed to install box64"
+rm -rf box64.deb box64_out
 ok "box64     → $PREFIX/bin/"
 
 # 4) x86_64 compat libs
-dl x86_64-linux-gnu.tar.gz x86_64-linux-gnu.tar.gz
-verify x86_64-linux-gnu.tar.gz
+info "Fetching latest x86_64 library archive name..."
+ARCHIVE_NAME=$(curl -fsSL https://easycli.sh/proot-distro/ \
+    | grep -oP 'debian-trixie-x86_64-pd-v\d+\.\d+\.\d+\.tar\.xz' \
+    | sort -V | tail -n 1) \
+    || die "Failed to find x86_64 archive"
+[ -n "$ARCHIVE_NAME" ] || die "No x86_64 archive found"
+
+info "Downloading $ARCHIVE_NAME ..."
+curl -fSL --progress-bar -o "$ARCHIVE_NAME" \
+    "https://easycli.sh/proot-distro/$ARCHIVE_NAME" \
+    || die "Download failed: $ARCHIVE_NAME"
+
 mkdir -p "$GLIBC_PREFIX/lib/x86_64-linux-gnu"
-tar xzf x86_64-linux-gnu.tar.gz --strip-components=1 -C "$GLIBC_PREFIX/lib/x86_64-linux-gnu"
+tar --exclude='engines-3' \
+    --exclude='gconv' \
+    --exclude='ossl-modules' \
+    --exclude='perl-base' \
+    --exclude='security' \
+    -xf "$ARCHIVE_NAME" \
+    --strip-components=4 \
+    -C "$GLIBC_PREFIX/lib/x86_64-linux-gnu" \
+    debian-trixie-x86_64/usr/lib/x86_64-linux-gnu \
+    || die "Extraction failed"
+rm -f "$ARCHIVE_NAME"
 ok "x86_64   → $GLIBC_PREFIX/lib/x86_64-linux-gnu/"
 
 # 5) box64 wrapper (glibc bin dir)
