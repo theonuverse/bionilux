@@ -32,7 +32,7 @@ For **x86\_64** binaries bionilux additionally chains through
 ### Option 1 — Quick installer (recommended)
 
 ```bash
-curl -sL https://theonuverse.github.io/bionilux/setup | bash
+curl -sL theonuverse.github.io/bionilux/setup | bash
 ```
 
 The installer:
@@ -46,11 +46,12 @@ The installer:
 ### Option 2 — Build from source
 
 ```bash
+yes | pkg up && pkg in git -y
 git clone https://github.com/theonuverse/bionilux.git
 cd bionilux
 ./build            # compile + install (auto-installs all dependencies)
-./build -c         # clean reinstall (removes old artefacts first)
 ```
+> ```./build -c       # clean reinstall```
 
 The only prerequisite is `git` (to clone the repo). The build script
 automatically installs `binutils`, `glibc-repo`, `clang`, `curl`, `file`,

@@ -61,15 +61,16 @@ fix_libc_symlink() {
 cd "$SCRIPT_DIR"
 
 if [ "${1:-}" = "-c" ] || [ "${1:-}" = "--clean" ] || [ "${1:-}" = "--clean-reinstall" ]; then
+    printf "> Clean reinstall\n"
     do_clean
 fi
 
 # ── prerequisites ────────────────────────────────────────────────────
 info "Checking prerequisites..."
-pkg update -y || warn "pkg update failed, attempting to continue..."
-pkg install -y binutils glibc-repo clang curl file git \
+pkg update -y > /dev/null 2>&1 || warn "pkg update failed, attempting to continue..."
+pkg install -y binutils glibc-repo clang curl file git > /dev/null 2>&1 \
     || die "Failed to install prerequisites"
-pkg install -y glibc || die "Failed to install glibc"
+pkg install -y glibc > /dev/null 2>&1 || die "Failed to install glibc"
 
 fix_libc_symlink
 
