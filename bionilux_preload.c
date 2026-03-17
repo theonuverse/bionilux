@@ -388,7 +388,7 @@ static char **build_new_envp(char *const envp[], const char *orig_exe)
  * Also strips LD_AUDIT and LD_DEBUG inherited from the glibc environment
  * — they are glibc-specific and meaningless (or harmful) under bionic.
  */
-static char **build_clean_envp(char *const envp[])
+static char **build_clean_envp(char *const envp[], int strip_all_ld_preload)
 {
 	const char *glibc_lib = getenv(GLIBC_LIB_ENV);
 	size_t envc = 0;
@@ -454,12 +454,17 @@ static char **build_clean_envp(char *const envp[])
 			continue;
 		}
 
-		/* remove glibc preload */
-		if (ENVPREFIX(envp[i], "LD_PRELOAD=") &&
-		    strstr(envp[i], "libbionilux_preload")) {
-			debug_print("stripping glibc LD_PRELOAD for "
-				    "bionic child");
-			continue;
+		/* optionally strip all LD_PRELOAD for native helper tools */
+		if (ENVPREFIX(envp[i], "LD_PRELOAD=")) {
+			if (strip_all_ld_preload) {
+				debug_print("stripping LD_PRELOAD for native helper");
+				continue;
+			}
+			if (strstr(envp[i], "libbionilux_preload")) {
+				debug_print("stripping glibc LD_PRELOAD for "
+					    "bionic child");
+				continue;
+			}
 		}
 
 		/*
@@ -480,6 +485,31 @@ static char **build_clean_envp(char *const envp[])
 
 	ev[j] = NULL;
 	return ev;
+}
+
+static int has_path_suffix(const char *path, const char *suffix)
+{
+	size_t lp, ls;
+
+	if (!path || !suffix)
+		return 0;
+
+	lp = strlen(path);
+	ls = strlen(suffix);
+	if (lp < ls)
+		return 0;
+
+	return memcmp(path + (lp - ls), suffix, ls) == 0;
+}
+
+/*
+ * Native helper binaries should run outside the glibc/preload context.
+ * We match both canonical /usr/bin paths and Termux absolute paths.
+ */
+static int is_native_helper_exec(const char *resolved)
+{
+	return has_path_suffix(resolved, "/usr/bin/sh") ||
+	       has_path_suffix(resolved, "/usr/bin/lscpu");
 }
 
 /* ── hooked exec functions ───────────────────────────────────────── */
@@ -510,9 +540,13 @@ int execve(const char *pathname, char *const argv[], char *const envp[])
 
 	glibc_bin = is_glibc_elf(resolved, glibc_lib);
 	if (glibc_bin != 1) {
-		debug_print("not glibc (result=%d), cleaning env", glibc_bin);
+		int native_helper = is_native_helper_exec(resolved);
 
-		char **clean = build_clean_envp(envp);
+		debug_print("not glibc (result=%d), cleaning env", glibc_bin);
+		if (native_helper)
+			debug_print("native helper detected: %s", resolved);
+
+		char **clean = build_clean_envp(envp, native_helper);
 
 		if (clean) {
 			int ret = safe_execve(pathname, argv, clean);

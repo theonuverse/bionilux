@@ -47,6 +47,7 @@
 #define GLIBC_LOADER  GLIBC_LIB "/ld-linux-aarch64.so.1"
 #define GLIBC_ETC     GLIBC_PREFIX "/etc"
 #define GLIBC_RESOLV_CONF GLIBC_ETC "/resolv.conf"
+#define BIONIC_HELPER_LIBPATH "/system/lib64:/data/data/com.termux/files/usr/lib"
 
 /*
  * x86_64 libraries live under the standard Linux multiarch path so
@@ -482,7 +483,7 @@ static char **build_environment(const char *preload_path, int for_box64,
 		envc++;
 
 	/* room for existing vars + ≤10 new ones + NULL */
-	env = calloc(envc + 12, sizeof(char *));
+	env = calloc(envc + 16, sizeof(char *));
 	if (!env)
 		return NULL;
 
@@ -494,6 +495,10 @@ static char **build_environment(const char *preload_path, int for_box64,
 		if (ENVPREFIX(environ[i], "BIONILUX_ORIG_EXE="))     continue;
 		if (ENVPREFIX(environ[i], "BOX64_LD_PRELOAD="))  continue;
 		if (ENVPREFIX(environ[i], "BOX64_PATH="))        continue;
+		if (for_box64 && ENVPREFIX(environ[i], "LD_LIBRARY_PATH="))
+			continue;
+		if (for_box64 && ENVPREFIX(environ[i], "BOX64_LD_LIBRARY_PATH="))
+			continue;
 
 		/*
 		 * Strip glibc-specific LD variables that could
@@ -526,22 +531,28 @@ static char **build_environment(const char *preload_path, int for_box64,
 
 	if (for_box64) {
 		const char *user_b64_ld = getenv("BOX64_LD_LIBRARY_PATH");
+		const char *user_host_ld = getenv("LD_LIBRARY_PATH");
 
 		/* Never propagate ARM64 preload into box64/x86_64 context. */
 		env[j] = xstrdup("LD_PRELOAD=");
 		if (!env[j]) { free_env(env); return NULL; } j++;
 
-		/* Prefer native aarch64 glibc wrappers for host-level syscalls. */
-		env[j] = xasprintf("LD_LIBRARY_PATH=%s", GLIBC_LIB);
+		/* Keep host helpers (sh/lscpu/...) on bionic libs first. */
+		if (user_host_ld && *user_host_ld) {
+			env[j] = xasprintf("LD_LIBRARY_PATH=%s:%s",
+					   BIONIC_HELPER_LIBPATH, user_host_ld);
+		} else {
+			env[j] = xstrdup("LD_LIBRARY_PATH=" BIONIC_HELPER_LIBPATH);
+		}
 		if (!env[j]) { free_env(env); return NULL; } j++;
 
 		if (user_b64_ld && *user_b64_ld) {
-			env[j] = xasprintf("BOX64_LD_LIBRARY_PATH=%s:%s:%s",
-					   GLIBC_LIB_X86, GLIBC_LIB,
+			env[j] = xasprintf("BOX64_LD_LIBRARY_PATH=%s:%s",
+					   GLIBC_LIB_X86,
 					   user_b64_ld);
 		} else {
-			env[j] = xasprintf("BOX64_LD_LIBRARY_PATH=%s:%s",
-					   GLIBC_LIB_X86, GLIBC_LIB);
+			env[j] = xasprintf("BOX64_LD_LIBRARY_PATH=%s",
+					   GLIBC_LIB_X86);
 		}
 		if (!env[j]) { free_env(env); return NULL; } j++;
 
