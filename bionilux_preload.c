@@ -36,6 +36,8 @@
 #define BIONILUX_DEBUG_ENV	"BIONILUX_DEBUG"
 #define BIONILUX_ORIG_EXE_ENV	"BIONILUX_ORIG_EXE"
 
+#define DEFAULT_GLIBC_PREFIX "/data/data/com.termux/files/usr/glibc"
+
 /* compile-time prefix match for environment variables */
 #define ENVPREFIX(var, lit)	(strncmp((var), (lit), sizeof(lit) - 1) == 0)
 
@@ -63,6 +65,10 @@ static void debug_print(const char *fmt, ...)
 static int     (*real_execve)(const char *, char *const[], char *const[]);
 static ssize_t (*real_readlink)(const char *, char *, size_t);
 static ssize_t (*real_readlinkat)(int, const char *, char *, size_t);
+static int     (*real_open)(const char *, int, ...);
+static int     (*real_open64)(const char *, int, ...);
+static int     (*real_openat)(int, const char *, int, ...);
+static int     (*real_openat64)(int, const char *, int, ...);
 
 /*
  * Fallback execve via raw syscall — used when dlsym(RTLD_NEXT) fails.
@@ -85,6 +91,135 @@ static inline int safe_execve(const char *path, char *const argv[],
 	if (real_execve)
 		return real_execve(path, argv, envp);
 	return fallback_execve(path, argv, envp);
+}
+
+/* ── open/openat path redirect for NSS/FHS ──────────────────────── */
+
+/*
+ * Resolve GLIBC prefix with minimal overhead.
+ * Priority: $GLIBC_PREFIX -> derive from $BIONILUX_GLIBC_LIB -> fallback.
+ */
+static const char *get_glibc_prefix(void)
+{
+	const char *p = getenv("GLIBC_PREFIX");
+	const char *lib;
+	static char derived[PATH_MAX];
+	const char *s;
+	size_t n;
+
+	if (p && *p)
+		return p;
+
+	lib = getenv(GLIBC_LIB_ENV);
+	if (!lib || !*lib)
+		return DEFAULT_GLIBC_PREFIX;
+
+	/* /.../glibc/lib or /.../glibc/lib/... -> /.../glibc */
+	s = strstr(lib, "/lib");
+	if (!s)
+		return DEFAULT_GLIBC_PREFIX;
+
+	n = (size_t)(s - lib);
+	if (n == 0 || n >= sizeof(derived))
+		return DEFAULT_GLIBC_PREFIX;
+
+	memcpy(derived, lib, n);
+	derived[n] = '\0';
+	return derived;
+}
+
+/*
+ * Rewrite selected absolute paths to Termux glibc layout.
+ * Returns @buf when rewritten, otherwise returns original @path.
+ */
+static const char *redirect_path_if_needed(const char *path,
+					   char *buf, size_t bufsz)
+{
+	const char *prefix;
+
+	if (!path || path[0] != '/')
+		return path;
+
+	prefix = get_glibc_prefix();
+
+	/* NSS + resolver files from /etc -> $GLIBC_PREFIX/etc */
+	if (!strcmp(path, "/etc/resolv.conf") ||
+	    !strcmp(path, "/etc/hosts") ||
+	    !strcmp(path, "/etc/nsswitch.conf") ||
+	    !strncmp(path, "/etc/", 5)) {
+		snprintf(buf, bufsz, "%s/etc/%s", prefix, path + 5);
+		debug_print("redirect: %s -> %s", path, buf);
+		return buf;
+	}
+
+	/* Multiarch library paths -> $GLIBC_PREFIX/lib/... */
+	if (!strncmp(path, "/lib/x86_64-linux-gnu/", 20)) {
+		snprintf(buf, bufsz, "%s/lib/x86_64-linux-gnu/%s",
+			 prefix, path + 20);
+		debug_print("redirect: %s -> %s", path, buf);
+		return buf;
+	}
+
+	if (!strncmp(path, "/usr/lib/", 9)) {
+		snprintf(buf, bufsz, "%s/lib/%s", prefix, path + 9);
+		debug_print("redirect: %s -> %s", path, buf);
+		return buf;
+	}
+
+	return path;
+}
+
+static inline int open_needs_mode(int flags)
+{
+	return (flags & O_CREAT) != 0;
+}
+
+static int fallback_openat_call(int dirfd, const char *path,
+				int flags, mode_t mode)
+{
+	return (int)syscall(SYS_openat, dirfd, path, flags, mode);
+}
+
+static int call_real_open(const char *path, int flags, mode_t mode)
+{
+	if (real_open) {
+		if (open_needs_mode(flags))
+			return real_open(path, flags, mode);
+		return real_open(path, flags);
+	}
+	return fallback_openat_call(AT_FDCWD, path, flags, mode);
+}
+
+static int call_real_open64(const char *path, int flags, mode_t mode)
+{
+	if (real_open64) {
+		if (open_needs_mode(flags))
+			return real_open64(path, flags, mode);
+		return real_open64(path, flags);
+	}
+	return call_real_open(path, flags, mode);
+}
+
+static int call_real_openat(int dirfd, const char *path,
+			    int flags, mode_t mode)
+{
+	if (real_openat) {
+		if (open_needs_mode(flags))
+			return real_openat(dirfd, path, flags, mode);
+		return real_openat(dirfd, path, flags);
+	}
+	return fallback_openat_call(dirfd, path, flags, mode);
+}
+
+static int call_real_openat64(int dirfd, const char *path,
+			      int flags, mode_t mode)
+{
+	if (real_openat64) {
+		if (open_needs_mode(flags))
+			return real_openat64(dirfd, path, flags, mode);
+		return real_openat64(dirfd, path, flags);
+	}
+	return call_real_openat(dirfd, path, flags, mode);
 }
 
 /* ── path resolution ─────────────────────────────────────────────── */
@@ -539,6 +674,80 @@ int execle(const char *pathname, const char *arg, ... /*, char *const envp[] */)
 	return ret;
 }
 
+/* ── hooked open/open64/openat/openat64 ─────────────────────────── */
+
+int open(const char *pathname, int flags, ...)
+{
+	mode_t mode = 0;
+	char redirected[PATH_MAX];
+	const char *target = redirect_path_if_needed(pathname, redirected,
+					     sizeof(redirected));
+
+	if (open_needs_mode(flags)) {
+		va_list ap;
+
+		va_start(ap, flags);
+		mode = va_arg(ap, mode_t);
+		va_end(ap);
+	}
+
+	return call_real_open(target, flags, mode);
+}
+
+int open64(const char *pathname, int flags, ...)
+{
+	mode_t mode = 0;
+	char redirected[PATH_MAX];
+	const char *target = redirect_path_if_needed(pathname, redirected,
+					     sizeof(redirected));
+
+	if (open_needs_mode(flags)) {
+		va_list ap;
+
+		va_start(ap, flags);
+		mode = va_arg(ap, mode_t);
+		va_end(ap);
+	}
+
+	return call_real_open64(target, flags, mode);
+}
+
+int openat(int dirfd, const char *pathname, int flags, ...)
+{
+	mode_t mode = 0;
+	char redirected[PATH_MAX];
+	const char *target = redirect_path_if_needed(pathname, redirected,
+					     sizeof(redirected));
+
+	if (open_needs_mode(flags)) {
+		va_list ap;
+
+		va_start(ap, flags);
+		mode = va_arg(ap, mode_t);
+		va_end(ap);
+	}
+
+	return call_real_openat(dirfd, target, flags, mode);
+}
+
+int openat64(int dirfd, const char *pathname, int flags, ...)
+{
+	mode_t mode = 0;
+	char redirected[PATH_MAX];
+	const char *target = redirect_path_if_needed(pathname, redirected,
+					     sizeof(redirected));
+
+	if (open_needs_mode(flags)) {
+		va_list ap;
+
+		va_start(ap, flags);
+		mode = va_arg(ap, mode_t);
+		va_end(ap);
+	}
+
+	return call_real_openat64(dirfd, target, flags, mode);
+}
+
 /* ── hooked readlink / readlinkat ────────────────────────────────── */
 
 /*
@@ -666,6 +875,30 @@ static void init(void)
 	*(void **)&real_readlinkat = dlsym(RTLD_NEXT, "readlinkat");
 	if (!real_readlinkat)
 		fprintf(stderr, "[bionilux] WARNING: dlsym(readlinkat) "
+			"failed: %s\n",
+			dlerror() ? dlerror() : "unknown");
+
+	*(void **)&real_open = dlsym(RTLD_NEXT, "open");
+	if (!real_open)
+		fprintf(stderr, "[bionilux] WARNING: dlsym(open) "
+			"failed: %s\n",
+			dlerror() ? dlerror() : "unknown");
+
+	*(void **)&real_open64 = dlsym(RTLD_NEXT, "open64");
+	if (!real_open64)
+		fprintf(stderr, "[bionilux] WARNING: dlsym(open64) "
+			"failed: %s\n",
+			dlerror() ? dlerror() : "unknown");
+
+	*(void **)&real_openat = dlsym(RTLD_NEXT, "openat");
+	if (!real_openat)
+		fprintf(stderr, "[bionilux] WARNING: dlsym(openat) "
+			"failed: %s\n",
+			dlerror() ? dlerror() : "unknown");
+
+	*(void **)&real_openat64 = dlsym(RTLD_NEXT, "openat64");
+	if (!real_openat64)
+		fprintf(stderr, "[bionilux] WARNING: dlsym(openat64) "
 			"failed: %s\n",
 			dlerror() ? dlerror() : "unknown");
 

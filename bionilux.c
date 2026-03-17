@@ -45,6 +45,8 @@
 #define GLIBC_PREFIX  "/data/data/com.termux/files/usr/glibc"
 #define GLIBC_LIB     GLIBC_PREFIX "/lib"
 #define GLIBC_LOADER  GLIBC_LIB "/ld-linux-aarch64.so.1"
+#define GLIBC_ETC     GLIBC_PREFIX "/etc"
+#define GLIBC_RESOLV_CONF GLIBC_ETC "/resolv.conf"
 
 /*
  * x86_64 libraries live under the standard Linux multiarch path so
@@ -419,6 +421,46 @@ static void free_env(char **env)
 	free(env);
 }
 
+static int ensure_resolv_conf(int debug)
+{
+	int fd;
+	static const char fallback[] = "nameserver 8.8.8.8\n";
+	const size_t n = sizeof(fallback) - 1;
+
+	if (access(GLIBC_RESOLV_CONF, F_OK) == 0)
+		return 0;
+
+	fd = open(GLIBC_RESOLV_CONF,
+		  O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+		  0644);
+	if (fd < 0) {
+		if (errno == EEXIST)
+			return 0;
+		msg_err("cannot create %s: %s",
+			GLIBC_RESOLV_CONF, strerror(errno));
+		return -1;
+	}
+
+	if (write(fd, fallback, n) != (ssize_t)n) {
+		msg_err("cannot write %s: %s",
+			GLIBC_RESOLV_CONF, strerror(errno));
+		close(fd);
+		unlink(GLIBC_RESOLV_CONF);
+		return -1;
+	}
+
+	if (close(fd) != 0) {
+		msg_err("cannot close %s: %s",
+			GLIBC_RESOLV_CONF, strerror(errno));
+		return -1;
+	}
+
+	if (debug)
+		msg_info("created DNS fallback: %s", GLIBC_RESOLV_CONF);
+
+	return 0;
+}
+
 /*
  * Build a new environment array for the child process.
  *
@@ -483,12 +525,34 @@ static char **build_environment(const char *preload_path, int for_box64,
 	}
 
 	if (for_box64) {
-		/* set BOX64_LD_LIBRARY_PATH if user hasn't overridden it */
-		if (!getenv("BOX64_LD_LIBRARY_PATH")) {
-			env[j] = xasprintf("BOX64_LD_LIBRARY_PATH=%s",
-					   GLIBC_LIB_X86);
-			if (!env[j]) { free_env(env); return NULL; } j++;
+		const char *user_b64_ld = getenv("BOX64_LD_LIBRARY_PATH");
+
+		/* Never propagate ARM64 preload into box64/x86_64 context. */
+		env[j] = xstrdup("LD_PRELOAD=");
+		if (!env[j]) { free_env(env); return NULL; } j++;
+
+		/* Prefer native aarch64 glibc wrappers for host-level syscalls. */
+		env[j] = xasprintf("LD_LIBRARY_PATH=%s", GLIBC_LIB);
+		if (!env[j]) { free_env(env); return NULL; } j++;
+
+		if (user_b64_ld && *user_b64_ld) {
+			env[j] = xasprintf("BOX64_LD_LIBRARY_PATH=%s:%s:%s",
+					   GLIBC_LIB_X86, GLIBC_LIB,
+					   user_b64_ld);
+		} else {
+			env[j] = xasprintf("BOX64_LD_LIBRARY_PATH=%s:%s",
+					   GLIBC_LIB_X86, GLIBC_LIB);
 		}
+		if (!env[j]) { free_env(env); return NULL; } j++;
+
+		env[j] = xstrdup("BOX64_DYNAREC_SAFEFLAGS=1");
+		if (!env[j]) { free_env(env); return NULL; } j++;
+
+		env[j] = xstrdup("BOX64_WAITLOOP=1");
+		if (!env[j]) { free_env(env); return NULL; } j++;
+
+		env[j] = xasprintf("RESOLV_CONF=%s", GLIBC_RESOLV_CONF);
+		if (!env[j]) { free_env(env); return NULL; } j++;
 
 		/* BOX64_PATH for child process re-exec */
 		env[j] = xasprintf("BOX64_PATH=%s/glibc/bin/:%s/bin/",
@@ -824,6 +888,9 @@ int main(int argc, char *argv[])
 	/* ── x86_64 via box64 ─────────────────────────────────────── */
 	if (info.arch == ARCH_X86_64) {
 		char box64_path[PATH_MAX];
+
+		if (ensure_resolv_conf(debug) < 0)
+			return 1;
 
 		if (!find_box64(box64_path, sizeof(box64_path))) {
 			msg_err("box64 is required for x86_64 binaries "
