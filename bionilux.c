@@ -138,13 +138,8 @@ static binary_info_t analyze_binary(const char *path)
 		goto out;
 	}
 
-	if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0) {
+	if (!elf_validate_header_and_phdr_table(fd, &ehdr)) {
 		info.arch = ARCH_NOT_ELF;
-		goto out;
-	}
-
-	if (ehdr.e_ident[EI_CLASS] != ELFCLASS64) {
-		info.arch = ARCH_UNKNOWN;
 		goto out;
 	}
 
@@ -172,6 +167,8 @@ static binary_info_t analyze_binary(const char *path)
 			continue;
 
 		if (phdr.p_filesz == 0 || phdr.p_filesz >= sizeof(info.interp_path))
+			break;
+		if (!elf_range_in_file(fd, phdr.p_offset, phdr.p_filesz))
 			break;
 
 		if (elf_pread(fd, info.interp_path, phdr.p_filesz,
@@ -282,12 +279,13 @@ static char *find_box64(char *resolved, size_t size)
 static void ensure_box64_wrapper(const char *real_box64)
 {
 	const char *prefix = get_prefix();
-	char wrapper[PATH_MAX], shebang[PATH_MAX];
+	char wrapper[PATH_MAX], shebang[PATH_MAX], tmp_tpl[PATH_MAX];
 	struct stat st;
-	FILE *fp;
+	int fd;
 
 	snprintf(wrapper, sizeof(wrapper), "%s/glibc/bin/box64", prefix);
 	snprintf(shebang, sizeof(shebang), "#!%s/bin/sh", prefix);
+	snprintf(tmp_tpl, sizeof(tmp_tpl), "%s.glbtmp.XXXXXX", wrapper);
 
 	/* quick check: if wrapper exists and already mentions real box64, skip */
 	if (stat(wrapper, &st) == 0 && S_ISREG(st.st_mode) && (st.st_mode & 0111)) {
@@ -305,24 +303,36 @@ static void ensure_box64_wrapper(const char *real_box64)
 		}
 	}
 
-	unlink(wrapper);
-	fp = fopen(wrapper, "w");
-	if (!fp)
+	fd = mkstemp(tmp_tpl);
+	if (fd < 0)
 		return;
 
-	if (fprintf(fp, "%s\nexec %s --library-path %s %s \"$@\"\n",
-		    shebang, GLIBC_LOADER, GLIBC_LIB, real_box64) < 0) {
-		fclose(fp);
-		unlink(wrapper);
+	{
+		char script[PATH_MAX * 2];
+		int n = snprintf(script, sizeof(script),
+				 "%s\nexec %s --library-path %s %s \"$@\"\n",
+				 shebang, GLIBC_LOADER, GLIBC_LIB, real_box64);
+		if (n <= 0 || (size_t)n >= sizeof(script) ||
+		    write(fd, script, (size_t)n) != (ssize_t)n) {
+			close(fd);
+			unlink(tmp_tpl);
+			return;
+		}
+	}
+
+	if (fchmod(fd, 0755) != 0) {
+		close(fd);
+		unlink(tmp_tpl);
 		return;
 	}
 
-	if (fclose(fp) != 0) {
-		unlink(wrapper);
+	if (close(fd) != 0) {
+		unlink(tmp_tpl);
 		return;
 	}
 
-	chmod(wrapper, 0755);
+	if (rename(tmp_tpl, wrapper) != 0)
+		unlink(tmp_tpl);
 }
 
 /* ── preload library extraction ──────────────────────────────────── */

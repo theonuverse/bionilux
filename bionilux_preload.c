@@ -45,6 +45,23 @@
 
 static int debug_enabled;
 
+static void constructor_warn(const char *symbol, const char *err)
+{
+	char buf[256];
+	int n;
+
+	n = snprintf(buf, sizeof(buf),
+		     "[bionilux] WARNING: dlsym(%s) failed: %s\n",
+		     symbol, err ? err : "unknown");
+	if (n > 0) {
+		size_t out = (size_t)n;
+
+		if (out > sizeof(buf))
+			out = sizeof(buf);
+		write(STDERR_FILENO, buf, out);
+	}
+}
+
 __attribute__((format(printf, 1, 2)))
 static void debug_print(const char *fmt, ...)
 {
@@ -136,32 +153,49 @@ static const char *redirect_path_if_needed(const char *path,
 					   char *buf, size_t bufsz)
 {
 	const char *prefix;
+	int n;
+
+	if (bufsz == 0)
+		return path;
 
 	if (!path || path[0] != '/')
 		return path;
 
+	/* Do not rewrite suspicious paths with dot-segments. */
+	if (strstr(path, "/../") || strstr(path, "/./") ||
+	    !strcmp(path, "/..") || !strcmp(path, "/."))
+		return path;
+
 	prefix = get_glibc_prefix();
+	if (!prefix || prefix[0] != '/')
+		return path;
 
 	/* NSS + resolver files from /etc -> $GLIBC_PREFIX/etc */
 	if (!strcmp(path, "/etc/resolv.conf") ||
 	    !strcmp(path, "/etc/hosts") ||
 	    !strcmp(path, "/etc/nsswitch.conf") ||
 	    !strncmp(path, "/etc/", 5)) {
-		snprintf(buf, bufsz, "%s/etc/%s", prefix, path + 5);
+		n = snprintf(buf, bufsz, "%s/etc/%s", prefix, path + 5);
+		if (n <= 0 || (size_t)n >= bufsz)
+			return path;
 		debug_print("redirect: %s -> %s", path, buf);
 		return buf;
 	}
 
 	/* Multiarch library paths -> $GLIBC_PREFIX/lib/... */
 	if (!strncmp(path, "/lib/x86_64-linux-gnu/", 20)) {
-		snprintf(buf, bufsz, "%s/lib/x86_64-linux-gnu/%s",
-			 prefix, path + 20);
+		n = snprintf(buf, bufsz, "%s/lib/x86_64-linux-gnu/%s",
+			     prefix, path + 20);
+		if (n <= 0 || (size_t)n >= bufsz)
+			return path;
 		debug_print("redirect: %s -> %s", path, buf);
 		return buf;
 	}
 
 	if (!strncmp(path, "/usr/lib/", 9)) {
-		snprintf(buf, bufsz, "%s/lib/%s", prefix, path + 9);
+		n = snprintf(buf, bufsz, "%s/lib/%s", prefix, path + 9);
+		if (n <= 0 || (size_t)n >= bufsz)
+			return path;
 		debug_print("redirect: %s -> %s", path, buf);
 		return buf;
 	}
@@ -896,45 +930,31 @@ static void init(void)
 	 */
 	*(void **)&real_execve = dlsym(RTLD_NEXT, "execve");
 	if (!real_execve)
-		fprintf(stderr, "[bionilux] WARNING: dlsym(execve) "
-			"failed: %s — using syscall fallback\n",
-			dlerror() ? dlerror() : "unknown");
+		constructor_warn("execve", dlerror());
 
 	*(void **)&real_readlink = dlsym(RTLD_NEXT, "readlink");
 	if (!real_readlink)
-		fprintf(stderr, "[bionilux] WARNING: dlsym(readlink) "
-			"failed: %s\n",
-			dlerror() ? dlerror() : "unknown");
+		constructor_warn("readlink", dlerror());
 
 	*(void **)&real_readlinkat = dlsym(RTLD_NEXT, "readlinkat");
 	if (!real_readlinkat)
-		fprintf(stderr, "[bionilux] WARNING: dlsym(readlinkat) "
-			"failed: %s\n",
-			dlerror() ? dlerror() : "unknown");
+		constructor_warn("readlinkat", dlerror());
 
 	*(void **)&real_open = dlsym(RTLD_NEXT, "open");
 	if (!real_open)
-		fprintf(stderr, "[bionilux] WARNING: dlsym(open) "
-			"failed: %s\n",
-			dlerror() ? dlerror() : "unknown");
+		constructor_warn("open", dlerror());
 
 	*(void **)&real_open64 = dlsym(RTLD_NEXT, "open64");
 	if (!real_open64)
-		fprintf(stderr, "[bionilux] WARNING: dlsym(open64) "
-			"failed: %s\n",
-			dlerror() ? dlerror() : "unknown");
+		constructor_warn("open64", dlerror());
 
 	*(void **)&real_openat = dlsym(RTLD_NEXT, "openat");
 	if (!real_openat)
-		fprintf(stderr, "[bionilux] WARNING: dlsym(openat) "
-			"failed: %s\n",
-			dlerror() ? dlerror() : "unknown");
+		constructor_warn("openat", dlerror());
 
 	*(void **)&real_openat64 = dlsym(RTLD_NEXT, "openat64");
 	if (!real_openat64)
-		fprintf(stderr, "[bionilux] WARNING: dlsym(openat64) "
-			"failed: %s\n",
-			dlerror() ? dlerror() : "unknown");
+		constructor_warn("openat64", dlerror());
 
 	debug_enabled = (getenv(BIONILUX_DEBUG_ENV) != NULL);
 

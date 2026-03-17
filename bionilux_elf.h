@@ -11,8 +11,10 @@
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <limits.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* ── EINTR-safe pread ────────────────────────────────────────────── */
@@ -31,6 +33,51 @@ static inline ssize_t elf_pread(int fd, void *buf, size_t count, off_t offset)
 	} while (n < 0 && errno == EINTR);
 
 	return n;
+}
+
+/* ── ELF bounds / shape validation helpers ──────────────────────── */
+
+static inline int elf_range_in_file(int fd, Elf64_Off off, Elf64_Xword size)
+{
+	struct stat st;
+	uint64_t end;
+
+	if (fstat(fd, &st) != 0)
+		return 0;
+	if (off > (Elf64_Off)st.st_size)
+		return 0;
+
+	end = (uint64_t)off + (uint64_t)size;
+	if (end < (uint64_t)off)
+		return 0;
+
+	return end <= (uint64_t)st.st_size;
+}
+
+static inline int elf_validate_header_and_phdr_table(int fd,
+					      const Elf64_Ehdr *ehdr)
+{
+	uint64_t ph_table_size;
+
+	if (memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0)
+		return 0;
+	if (ehdr->e_ident[EI_CLASS] != ELFCLASS64)
+		return 0;
+	if (ehdr->e_ident[EI_DATA] != ELFDATA2LSB)
+		return 0;
+	if (ehdr->e_ehsize < sizeof(*ehdr))
+		return 0;
+
+	if (ehdr->e_phnum == 0 || ehdr->e_phoff == 0)
+		return 1;
+	if (ehdr->e_phentsize != sizeof(Elf64_Phdr))
+		return 0;
+
+	ph_table_size = (uint64_t)ehdr->e_phnum * (uint64_t)ehdr->e_phentsize;
+	if (ehdr->e_phoff > UINT64_MAX - ph_table_size)
+		return 0;
+
+	return elf_range_in_file(fd, ehdr->e_phoff, ph_table_size);
 }
 
 /* ── glibc ELF detection ─────────────────────────────────────────── */
@@ -59,9 +106,7 @@ static inline int is_glibc_elf(const char *path, const char *glibc_lib)
 	if (elf_pread(fd, &ehdr, sizeof(ehdr), 0) != (ssize_t)sizeof(ehdr))
 		goto out;
 
-	if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0)
-		goto out;
-	if (ehdr.e_ident[EI_CLASS] != ELFCLASS64)
+	if (!elf_validate_header_and_phdr_table(fd, &ehdr))
 		goto out;
 	if (ehdr.e_type != ET_EXEC && ehdr.e_type != ET_DYN)
 		goto out;
@@ -81,6 +126,8 @@ static inline int is_glibc_elf(const char *path, const char *glibc_lib)
 			continue;
 
 		if (phdr.p_filesz == 0 || phdr.p_filesz >= PATH_MAX)
+			break;
+		if (!elf_range_in_file(fd, phdr.p_offset, phdr.p_filesz))
 			break;
 
 		char interp[PATH_MAX];
