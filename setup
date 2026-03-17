@@ -5,10 +5,34 @@
 #
 set -eu
 
-readonly VERSION="0.2.0"
 readonly PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 readonly GLIBC_PREFIX="$PREFIX/glibc"
-readonly BASE="https://github.com/theonuverse/bionilux/releases/download/v${VERSION}"
+readonly REPO="theonuverse/bionilux"
+
+resolve_release_tag() {
+    local pinned latest
+
+    pinned="${BIONILUX_VERSION:-}"
+    if [ -n "$pinned" ]; then
+        case "$pinned" in
+            v*) printf "%s" "$pinned" ;;
+            *)  printf "v%s" "$pinned" ;;
+        esac
+        return
+    fi
+
+    latest=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+        | grep -oP '"tag_name"\s*:\s*"\K[^"]+' \
+        | head -n1) || true
+
+    if [ -n "$latest" ]; then
+        printf "%s" "$latest"
+        return
+    fi
+
+    # Fallback for offline/API-limit cases.
+    printf "v0.2.0"
+}
 
 # ── colours ──────────────────────────────────────────────────────────
 G='\033[0;32m' Y='\033[1;33m' R='\033[0;31m' B='\033[0;34m' N='\033[0m'
@@ -55,7 +79,12 @@ verify() {
 }
 
 # ── main ─────────────────────────────────────────────────────────────
-printf "\n${B}  bionilux installer v${VERSION}${N}\n\n"
+readonly VERSION="$(resolve_release_tag)"
+readonly BASE="https://github.com/theonuverse/bionilux/releases/download/${VERSION}"
+
+printf "\n${B}  bionilux installer ${VERSION}${N}\n\n"
+
+info "Using release: ${VERSION}"
 
 fix_libc
 
