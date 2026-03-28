@@ -157,7 +157,7 @@ ok "x86_64   → $GLIBC_PREFIX/lib/x86_64-linux-gnu/"
 mkdir -p "$GLIBC_PREFIX/bin"
 
 # ── done ─────────────────────────────────────────────────────────────
-printf "\n${G}  ✓ bionilux v${VERSION} installed${N}\n\n"
+printf "\n${G}  ✓ bionilux ${VERSION} installed${N}\n\n"
 printf "  ${Y}bionilux <binary> [args...]${N}      Run a binary\n"
 printf "  ${Y}bionilux -d <binary>${N}            Debug mode\n"
 printf "  ${Y}bionilux --version${N}               Version info\n\n"
