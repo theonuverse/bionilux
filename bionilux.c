@@ -660,12 +660,16 @@ static inline void release_wake_lock(int debug)
  *
  * Strategy: SIGTERM → wait 2 seconds → SIGKILL if still running.
  * Non-blocking on failures (best-effort).
+ * 
+ * IMPORTANT: Filters to exclude current PID to avoid killing the bionilux
+ * process itself (which appears in the command line).
  */
 static void cleanup_stale_processes(const char *binary_path, int debug)
 {
-	char cmd[PATH_MAX * 2];
+	char cmd[PATH_MAX * 3];
 	char basename_buf[PATH_MAX];
 	const char *binary_name;
+	pid_t mypid = getpid();
 	int ret;
 
 	/* Extract basename for process matching. */
@@ -686,13 +690,16 @@ static void cleanup_stale_processes(const char *binary_path, int debug)
 	if (debug)
 		msg_info("cleaning up stale processes: %s", binary_name);
 
-	/* Attempt soft termination: SIGTERM. */
+	/* Attempt soft termination: SIGTERM.
+	 * Use a shell loop to exclude current PID.
+	 */
 	ret = snprintf(cmd, sizeof(cmd),
-		       "pgrep -f '%s' | xargs -r kill -TERM 2>/dev/null || true",
-		       binary_name);
+		       "pgrep -f '%s' | while read pid; do [ \"$pid\" != \"%d\" ] && kill -TERM \"$pid\" 2>/dev/null || true; done",
+		       binary_name, (int)mypid);
 	if (ret > 0 && (size_t)ret < sizeof(cmd)) {
-		if (system(cmd) == 0 && debug)
-			msg_ok("sent SIGTERM to old processes");
+		if (debug)
+			msg_ok("attempting soft kill of old processes");
+		system(cmd);
 	}
 
 	/* Wait briefly for graceful shutdown. */
@@ -700,11 +707,12 @@ static void cleanup_stale_processes(const char *binary_path, int debug)
 
 	/* Hard kill any remaining instances. */
 	ret = snprintf(cmd, sizeof(cmd),
-		       "pgrep -f '%s' | xargs -r kill -KILL 2>/dev/null || true",
-		       binary_name);
+		       "pgrep -f '%s' | while read pid; do [ \"$pid\" != \"%d\" ] && kill -KILL \"$pid\" 2>/dev/null || true; done",
+		       binary_name, (int)mypid);
 	if (ret > 0 && (size_t)ret < sizeof(cmd)) {
-		if (system(cmd) == 0 && debug)
-			msg_ok("sent SIGKILL to remaining processes");
+		if (debug)
+			msg_ok("attempting hard kill of remaining processes");
+		system(cmd);
 	}
 }
 
