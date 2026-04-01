@@ -652,6 +652,62 @@ static inline void release_wake_lock(int debug)
 	run_wakelock_cmd("termux-wake-unlock", debug);
 }
 
+/* ── stale process cleanup ───────────────────────────────────────── */
+
+/*
+ * Attempt to gracefully terminate any running instances of the target
+ * binary. This prevents port conflicts and file lock issues after crashes.
+ *
+ * Strategy: SIGTERM → wait 2 seconds → SIGKILL if still running.
+ * Non-blocking on failures (best-effort).
+ */
+static void cleanup_stale_processes(const char *binary_path, int debug)
+{
+	char cmd[PATH_MAX * 2];
+	char basename_buf[PATH_MAX];
+	const char *binary_name;
+	int ret;
+
+	/* Extract basename for process matching. */
+	{
+		char *dup = strdup(binary_path);
+		if (!dup)
+			return;
+		binary_name = basename(dup);
+		if (!binary_name || strlen(binary_name) >= sizeof(basename_buf)) {
+			free(dup);
+			return;
+		}
+		strlcpy(basename_buf, binary_name, sizeof(basename_buf));
+		free(dup);
+		binary_name = basename_buf;
+	}
+
+	if (debug)
+		msg_info("cleaning up stale processes: %s", binary_name);
+
+	/* Attempt soft termination: SIGTERM. */
+	ret = snprintf(cmd, sizeof(cmd),
+		       "pgrep -f '%s' | xargs -r kill -TERM 2>/dev/null || true",
+		       binary_name);
+	if (ret > 0 && (size_t)ret < sizeof(cmd)) {
+		if (system(cmd) == 0 && debug)
+			msg_ok("sent SIGTERM to old processes");
+	}
+
+	/* Wait briefly for graceful shutdown. */
+	sleep(2);
+
+	/* Hard kill any remaining instances. */
+	ret = snprintf(cmd, sizeof(cmd),
+		       "pgrep -f '%s' | xargs -r kill -KILL 2>/dev/null || true",
+		       binary_name);
+	if (ret > 0 && (size_t)ret < sizeof(cmd)) {
+		if (system(cmd) == 0 && debug)
+			msg_ok("sent SIGKILL to remaining processes");
+	}
+}
+
 /* ── signal forwarding ───────────────────────────────────────────── */
 
 /*
@@ -961,6 +1017,7 @@ int main(int argc, char *argv[])
 			av[k++] = argv[arg_start + (int)i];
 		av[k] = NULL;
 
+		cleanup_stale_processes(binary_path, debug);
 		int rc = run_child(exec_path, av, env, binary_path, debug);
 		free(av);
 		free_env(env);
@@ -1016,6 +1073,7 @@ int main(int argc, char *argv[])
 			msg_info("exec: %s --library-path %s %s",
 				 GLIBC_LOADER, GLIBC_LIB, binary_path);
 
+		cleanup_stale_processes(binary_path, debug);
 		int rc = run_child(GLIBC_LOADER, av, env, binary_path, debug);
 		free(av);
 		free_env(env);
