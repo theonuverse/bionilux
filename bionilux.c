@@ -966,8 +966,12 @@ int main(int argc, char *argv[])
 	char *preload = extract_preload(preload_buf, sizeof(preload_buf));
 
 	if (debug) {
-		if (preload) msg_info("preload: %s", preload);
-		else         msg_warn("no preload library available");
+		if (!use_preload)
+			msg_info("preload: disabled (-n flag)");
+		else if (preload)
+			msg_info("preload: %s", preload);
+		else
+			msg_warn("no preload library available");
 	}
 
 	/* ── x86_64 via box64 ─────────────────────────────────────── */
