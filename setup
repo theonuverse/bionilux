@@ -8,6 +8,7 @@ set -eu
 readonly PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 readonly GLIBC_PREFIX="$PREFIX/glibc"
 readonly BOX64_DEST="$PREFIX/bionilux/box64/bin/box64"
+readonly BOX64_REAL_DEST="$PREFIX/bionilux/box64/bin/box64.real"
 readonly REPO="theonuverse/bionilux"
 
 resolve_release_tag() {
@@ -79,6 +80,57 @@ verify() {
     fi
 }
 
+# ── box64 wrapper ───────────────────────────────────────────────────
+install_box64_wrapper() {
+    local real="$1"
+    local wrapper="$2"
+    local interp mode
+
+    mode="direct"
+    interp="$(LC_ALL=C readelf -l "$real" 2>/dev/null \
+        | sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p' \
+        | head -n 1 || true)"
+
+    case "$interp" in
+        *ld-linux-aarch64.so.1*)
+            mode="glibc"
+            ;;
+    esac
+
+    cat > "$wrapper" << 'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+set -eu
+
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+REAL="$PREFIX/bionilux/box64/bin/box64.real"
+
+if [ ! -x "$REAL" ]; then
+    echo "bionilux: missing box64 real binary: $REAL" >&2
+    exit 127
+fi
+EOF
+
+    if [ "$mode" = "glibc" ]; then
+        cat >> "$wrapper" << 'EOF'
+LOADER="$PREFIX/glibc/lib/ld-linux-aarch64.so.1"
+
+if [ ! -x "$LOADER" ]; then
+    echo "bionilux: missing glibc loader: $LOADER" >&2
+    exit 127
+fi
+
+exec "$LOADER" --library-path "$PREFIX/glibc/lib" --argv0 box64 "$REAL" "$@"
+EOF
+    else
+        cat >> "$wrapper" << 'EOF'
+exec "$REAL" "$@"
+EOF
+    fi
+
+    chmod 755 "$wrapper"
+    info "box64 wrapper mode: $mode"
+}
+
 # ── main ─────────────────────────────────────────────────────────────
 readonly VERSION="$(resolve_release_tag)"
 readonly BASE="https://github.com/theonuverse/bionilux/releases/download/${VERSION}"
@@ -123,10 +175,12 @@ curl -fSL --progress-bar -o box64.deb \
 
 dpkg-deb -x box64.deb box64_out || die "Failed to extract box64 .deb"
 mkdir -p "$(dirname "$BOX64_DEST")"
-install -m 755 box64_out/usr/local/bin/box64 "$BOX64_DEST" \
-    || die "Failed to install box64"
+install -m 755 box64_out/usr/local/bin/box64 "$BOX64_REAL_DEST" \
+    || die "Failed to install box64 real binary"
+install_box64_wrapper "$BOX64_REAL_DEST" "$BOX64_DEST"
 rm -rf box64.deb box64_out
-ok "box64     → $BOX64_DEST"
+ok "box64 wrapper → $BOX64_DEST"
+ok "box64 real    → $BOX64_REAL_DEST"
 
 # 4) x86_64 compat libs
 info "Fetching latest x86_64 library archive name..."

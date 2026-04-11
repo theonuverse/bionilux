@@ -64,7 +64,8 @@ The build script installs:
 |----------|-------------|
 | `bionilux` | `$PREFIX/bin/` |
 | `libbionilux_preload.so` | `$PREFIX/glibc/lib/` |
-| `box64` (bundled) | `$PREFIX/bionilux/box64/bin/` |
+| `box64` wrapper (bundled) | `$PREFIX/bionilux/box64/bin/box64` |
+| `box64` real binary | `$PREFIX/bionilux/box64/bin/box64.real` |
 | x86\_64 compat libs | `$PREFIX/glibc/lib/x86_64-linux-gnu/` |
 
 ## Usage
@@ -193,6 +194,7 @@ If bundled `box64` is missing, verify:
 
 ```bash
 ls "$PREFIX/bionilux/box64/bin/box64"
+ls "$PREFIX/bionilux/box64/bin/box64.real"
 ```
 
 If they are missing, re-run the build script or download them manually into

@@ -17,6 +17,7 @@ GLIBC_PREFIX="$PREFIX/glibc"
 
 X86_LIB_DIR="$GLIBC_PREFIX/lib/x86_64-linux-gnu"
 BOX64_DEST="$PREFIX/bionilux/box64/bin/box64"
+BOX64_REAL_DEST="$PREFIX/bionilux/box64/bin/box64.real"
 PRELOAD_DEST="$GLIBC_PREFIX/lib/libbionilux_preload.so"
 BIONILUX_DEST="$PREFIX/bin/bionilux"
 
@@ -38,10 +39,62 @@ do_clean() {
     rm -f  "$BIONILUX_DEST"                         2>/dev/null || true
     rm -f  "$PRELOAD_DEST"                      2>/dev/null || true
     rm -f  "$BOX64_DEST"                        2>/dev/null || true
+    rm -f  "$BOX64_REAL_DEST"                   2>/dev/null || true
     rm -rf "$GLIBC_PREFIX/lib_x86_64"           2>/dev/null || true
     rm -rf "$X86_LIB_DIR"                       2>/dev/null || true
     rm -f  bionilux libbionilux_preload.so preload_data.h 2>/dev/null || true
     ok "Clean complete"
+}
+
+# ── box64 wrapper ───────────────────────────────────────────────────
+install_box64_wrapper() {
+    local real="$1"
+    local wrapper="$2"
+    local interp mode
+
+    mode="direct"
+    interp="$(LC_ALL=C readelf -l "$real" 2>/dev/null \
+        | sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p' \
+        | head -n 1 || true)"
+
+    case "$interp" in
+        *ld-linux-aarch64.so.1*)
+            mode="glibc"
+            ;;
+    esac
+
+    cat > "$wrapper" << 'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+set -eu
+
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+REAL="$PREFIX/bionilux/box64/bin/box64.real"
+
+if [ ! -x "$REAL" ]; then
+    echo "bionilux: missing box64 real binary: $REAL" >&2
+    exit 127
+fi
+EOF
+
+    if [ "$mode" = "glibc" ]; then
+        cat >> "$wrapper" << 'EOF'
+LOADER="$PREFIX/glibc/lib/ld-linux-aarch64.so.1"
+
+if [ ! -x "$LOADER" ]; then
+    echo "bionilux: missing glibc loader: $LOADER" >&2
+    exit 127
+fi
+
+exec "$LOADER" --library-path "$PREFIX/glibc/lib" --argv0 box64 "$REAL" "$@"
+EOF
+    else
+        cat >> "$wrapper" << 'EOF'
+exec "$REAL" "$@"
+EOF
+    fi
+
+    chmod 755 "$wrapper"
+    info "box64 wrapper mode: $mode"
 }
 
 # ── libc.so symlink fix ─────────────────────────────────────────────
@@ -111,7 +164,7 @@ info "Checking box64..."
 
 mkdir -p "$(dirname "$BOX64_DEST")"
 
-if [ -x "$BOX64_DEST" ]; then
+if [ -x "$BOX64_DEST" ] && [ -x "$BOX64_REAL_DEST" ]; then
     info "Already present — skipping"
 else
     info "Fetching latest box64 .deb name..."
@@ -129,11 +182,13 @@ else
     dpkg-deb -x "$tmpdir/box64.deb" "$tmpdir/box64_out" \
         || die "Failed to extract box64 .deb"
 
-    install -m 755 "$tmpdir/box64_out/usr/local/bin/box64" "$BOX64_DEST" \
-        || die "Failed to install box64"
+    install -m 755 "$tmpdir/box64_out/usr/local/bin/box64" "$BOX64_REAL_DEST" \
+        || die "Failed to install box64 real binary"
+    install_box64_wrapper "$BOX64_REAL_DEST" "$BOX64_DEST"
 
     rm -rf "$tmpdir/box64.deb" "$tmpdir/box64_out"
-    ok "Installed box64 → $BOX64_DEST"
+    ok "Installed box64 real   → $BOX64_REAL_DEST"
+    ok "Installed box64 wrapper→ $BOX64_DEST"
 fi
 
 # ── step 1: preload library (glibc sysroot) ─────────────────────────
@@ -219,7 +274,8 @@ fi
 ok "Installed bionilux        → $BIONILUX_DEST"
 ok "Installed preload     → $PRELOAD_DEST"
 ok "x86_64 libs           → $X86_LIB_DIR"
-ok "box64                 → $BOX64_DEST"
+ok "box64 wrapper         → $BOX64_DEST"
+ok "box64 real            → $BOX64_REAL_DEST"
 
 printf "\n${GREEN}════════════════════════════════════════${NC}\n"
 printf "${GREEN}  bionilux v${VERSION} installed successfully${NC}\n"
