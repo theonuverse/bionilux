@@ -520,6 +520,7 @@ static char **build_environment(const char *preload_path, int for_box64,
 	if (for_box64) {
 		const char *user_b64_ld = getenv("BOX64_LD_LIBRARY_PATH");
 		const char *user_box64_path = getenv("BOX64_PATH");
+		const char *user_box64_uname = getenv("BOX64_UNAME");
 		const char *user_host_ld = getenv("LD_LIBRARY_PATH");
 
 		/* Never propagate ARM64 preload into box64/x86_64 context. */
@@ -553,6 +554,12 @@ static char **build_environment(const char *preload_path, int for_box64,
 					   get_prefix());
 		}
 		if (!env[j]) { free_env(env); return NULL; } j++;
+
+		/* Compatibility default: some x86_64 binaries expect uname -m=x86_64. */
+		if (!user_box64_uname || !*user_box64_uname) {
+			env[j] = xstrdup("BOX64_UNAME=x86_64");
+			if (!env[j]) { free_env(env); return NULL; } j++;
+		}
 
 		/*
 		 * Do NOT set BOX64_LD_PRELOAD — the preload .so is ARM64

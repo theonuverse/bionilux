@@ -779,16 +779,16 @@ int execveat(int dirfd, const char *pathname, char *const argv[],
 {
 	char fd_path[64];
 
-	if (pathname && pathname[0] == '/')
-		return execve(pathname, argv, envp);
-
-	if (dirfd == AT_FDCWD && pathname && !(flags & AT_EMPTY_PATH))
-		return execve(pathname, argv, envp);
-
-	if ((flags & AT_EMPTY_PATH) && pathname && pathname[0] == '\0') {
+	if ((flags & AT_EMPTY_PATH) && pathname[0] == '\0') {
 		snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", dirfd);
 		return execve(fd_path, argv, envp);
 	}
+
+	if (pathname[0] == '/')
+		return execve(pathname, argv, envp);
+
+	if (dirfd == AT_FDCWD)
+		return execve(pathname, argv, envp);
 
 	return safe_execveat(dirfd, pathname, argv, envp, flags);
 }
