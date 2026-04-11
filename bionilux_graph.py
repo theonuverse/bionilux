@@ -4,7 +4,7 @@ from graphviz import Digraph
 def create_bionilux_diagram():
     dot = Digraph('bionilux_architecture', format='png')
     dot.attr(rankdir='TB', nodesep='0.6', ranksep='0.7', dpi='150')
-    dot.attr('graph', label='bionilux v0.2.0 \u2014 Architecture',
+    dot.attr('graph', label='bionilux v0.3.0 - Architecture',
              labelloc='t', fontsize='16', fontname='Arial Bold')
     dot.attr('node', shape='box', style='rounded,filled',
              fillcolor='#f9f9f9', fontname='Arial', fontsize='10')
@@ -22,6 +22,7 @@ def create_bionilux_diagram():
         '\u2022 Detects arch: aarch64 / x86_64\n'
         '\u2022 Detects libc: glibc / bionic / musl\n'
         '\u2022 Extracts embedded preload .so on first run\n'
+        '\u2022 Uses wrapper + box64.real for recursive-safe x86_64 launch\n'
         '\u2022 Builds sanitized environment (strips LD_AUDIT etc.)\n'
         '\u2022 Installs signal handlers BEFORE fork()\n'
         '\u2022 Acquires Termux wake-lock during execution'
@@ -55,10 +56,10 @@ def create_bionilux_diagram():
              fillcolor='#c8e6c9', color='#2e7d32')
 
     # x86_64 path
-    dot.node('x86', 'x86_64 binary',
+    dot.node('x86', 'x86_64 glibc binary',
              fillcolor='#ffccbc', color='#bf360c')
-    dot.node('box64', 'box64  (x86_64 \u2192 ARM64 emulator)\n'
-             '+ glibc loader wrapper script',
+    dot.node('box64', 'box64 wrapper + box64.real\n'
+             '(x86_64 \u2192 ARM64 emulator)',
              fillcolor='#ffccbc', color='#bf360c')
 
     # Preload library
@@ -94,7 +95,7 @@ def create_bionilux_diagram():
 
     dot.edge('arm64_glibc', 'loader', label='--library-path\n--argv0')
     dot.edge('arm64_bionic', 'direct')
-    dot.edge('x86', 'box64', label='BOX64_LD_LIBRARY_PATH\nBOX64_PATH')
+    dot.edge('x86', 'box64', label='BOX64_LD_LIBRARY_PATH\nBOX64_PATH\n(wrapper mode: direct/glibc)')
 
     dot.edge('loader', 'preload', label='LD_PRELOAD')
     dot.edge('preload', 'elf_h', label='#include',

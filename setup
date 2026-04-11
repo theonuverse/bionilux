@@ -33,7 +33,7 @@ resolve_release_tag() {
     fi
 
     # Fallback for offline/API-limit cases.
-    printf "v0.2.0"
+    printf "v0.3.0"
 }
 
 # ── colours ──────────────────────────────────────────────────────────

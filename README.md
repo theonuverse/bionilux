@@ -27,6 +27,24 @@ For **x86\_64** binaries bionilux additionally chains through
 
 ![bionilux Architecture](assets/bionilux_architecture_diagram.png)
 
+## Source Layout
+
+The project is organized into small, focused modules:
+
+| Path | Responsibility |
+|------|----------------|
+| `bionilux.c` | Thin launcher entrypoint that includes launcher modules |
+| `src/launcher/elf_path.c` | ELF parsing + binary/path resolution |
+| `src/launcher/environment.c` | Preload extraction + child environment construction |
+| `src/launcher/runtime.c` | Wake lock, stale cleanup, signal forwarding, script exec |
+| `src/launcher/main_cli.c` | CLI help/version + main dispatch logic |
+| `bionilux_preload.c` | Thin preload entrypoint that includes preload modules |
+| `src/preload/path_env.c` | Path rewriting + env/argv builders |
+| `src/preload/hooks_exec.c` | exec* interception and loader redirection |
+| `src/preload/hooks_io.c` | open*/readlink* hooks and `/proc/self/exe` handling |
+| `src/preload/ctor.c` | dlsym initialization constructor |
+| `bionilux_elf.h` | Shared ELF helpers used by launcher and preload |
+
 ## Installation
 
 ### Option 1 — Quick installer (recommended)
@@ -39,7 +57,7 @@ The installer:
 
 - Installs `binutils`, `glibc-repo`, `clang`, `curl`, `file`, `git`, and `glibc`.
 - Fixes the `libc.so` linker-script symlink.
-- Downloads `bionilux` and the preload library from the **v0.2.0** release.
+- Downloads `bionilux` and the preload library from the latest release.
 - Fetches `box64` from [Pi-Apps-Coders/box64-debs](https://github.com/Pi-Apps-Coders/box64-debs).
 - Fetches x86\_64 runtime libraries from [easycli.sh](https://easycli.sh/proot-distro/).
 
@@ -93,10 +111,10 @@ bionilux -- ./program --help
 
 ```bash
 # ARM64 glibc binary
-bionilux ./geekbench6
+bionilux ./my_glibc_app
 
 # x86_64 binary (box64 is selected automatically)
-bionilux ./bedrock_server
+bionilux ./my_x86_64_app
 
 # Debug mode
 bionilux -d ./myapp
@@ -119,17 +137,32 @@ bionilux -n ./static_hello
 | `BIONILUX_DEBUG` | *(unset)* | Set to `1` for debug output |
 | `BIONILUX_ORIG_EXE` | *(internal)* | Original binary path for `/proc/self/exe` fix |
 
-## Example: Running Geekbench 6 for ARM
+## Example: Running Geekbench 6 (ARM build)
 
 ```bash
 cd ~
-curl -fLO https://cdn.geekbench.com/Geekbench-6.6.0-LinuxARMPreview.tar.gz
-tar xf Geekbench-6.6.0-LinuxARMPreview.tar.gz
-cd Geekbench-6.6.0-LinuxARMPreview
+curl -fLO https://cdn.geekbench.com/Geekbench-6.7.0-LinuxARMPreview.tar.gz
+tar xf Geekbench-6.7.0-LinuxARMPreview.tar.gz
+cd Geekbench-6.7.0-LinuxARMPreview
 bionilux ./geekbench6
 ```
 
+Use the Linux ARMPreview package for this workflow.
+
 ## Technical Details
+
+### Why `box64` and `box64.real` both exist
+
+`box64.real` is the actual Box64 ELF binary.
+
+`box64` is a small wrapper script installed by bionilux. It decides how to launch
+`box64.real` safely:
+
+- Direct execution for binaries that do not need glibc loader mediation.
+- Glibc-loader-mediated execution when required.
+
+This wrapper+real split prevents recursive launch failures in nested x86_64
+handoff paths while keeping installation predictable.
 
 ### ELF Detection
 
@@ -199,6 +232,35 @@ ls "$PREFIX/bionilux/box64/bin/box64.real"
 
 If they are missing, re-run the build script or download them manually into
 `$PREFIX/glibc/lib/x86_64-linux-gnu/`.
+
+## Release Workflow
+
+After building and pushing changes:
+
+1. Build and verify locally:
+
+```bash
+./build -c
+bionilux --version
+```
+
+2. Run smoke tests (arm64 glibc binary and at least one x86_64 binary).
+
+3. Commit and push to `main`.
+
+4. Create a tag and release:
+
+```bash
+git tag -a v0.3.0 -m "bionilux v0.3.0"
+git push origin v0.3.0
+```
+
+5. Upload release assets:
+  - `bionilux`
+  - `libbionilux_preload.so`
+  - `SHA256SUMS` (recommended)
+
+6. Verify the installer resolves the intended release and downloads assets.
 
 ## License
 
