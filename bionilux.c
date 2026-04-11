@@ -522,6 +522,9 @@ static char **build_environment(const char *preload_path, int for_box64,
 		const char *user_box64_path = getenv("BOX64_PATH");
 		const char *user_box64_uname = getenv("BOX64_UNAME");
 		const char *user_host_ld = getenv("LD_LIBRARY_PATH");
+		const char *user_path = getenv("PATH");
+		char binary_dir[PATH_MAX];
+		const char *orig_dir = NULL;
 
 		/* Never propagate ARM64 preload into box64/x86_64 context. */
 		env[j] = xstrdup("LD_PRELOAD=");
@@ -545,8 +548,37 @@ static char **build_environment(const char *preload_path, int for_box64,
 		env[j] = xasprintf("RESOLV_CONF=%s", GLIBC_RESOLV_CONF);
 		if (!env[j]) { free_env(env); return NULL; } j++;
 
+		if (orig_binary && *orig_binary) {
+			char tmp[PATH_MAX];
+			char *dir;
+
+			snprintf(tmp, sizeof(tmp), "%s", orig_binary);
+			dir = dirname(tmp);
+			if (dir && *dir) {
+				snprintf(binary_dir, sizeof(binary_dir), "%s", dir);
+				orig_dir = binary_dir;
+			}
+		}
+
 		if (user_box64_path && *user_box64_path) {
 			env[j] = xasprintf("BOX64_PATH=%s", user_box64_path);
+		} else if (orig_dir && user_path && *user_path) {
+			env[j] = xasprintf("BOX64_PATH=%s:%s/%s:%s",
+					   orig_dir,
+					   get_prefix(),
+					   BIONILUX_INTERNAL_BOX64_DIR_REL,
+					   user_path);
+		} else if (orig_dir) {
+			env[j] = xasprintf("BOX64_PATH=%s:%s/%s:%s/bin",
+					   orig_dir,
+					   get_prefix(),
+					   BIONILUX_INTERNAL_BOX64_DIR_REL,
+					   get_prefix());
+		} else if (user_path && *user_path) {
+			env[j] = xasprintf("BOX64_PATH=%s/%s:%s",
+					   get_prefix(),
+					   BIONILUX_INTERNAL_BOX64_DIR_REL,
+					   user_path);
 		} else {
 			env[j] = xasprintf("BOX64_PATH=%s/%s:%s/bin",
 					   get_prefix(),
