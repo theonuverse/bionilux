@@ -12,6 +12,8 @@
  */
 
 #define _GNU_SOURCE
+#include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <elf.h>
 #include <fcntl.h>
@@ -48,6 +50,8 @@
 #define GLIBC_ETC     GLIBC_PREFIX "/etc"
 #define GLIBC_RESOLV_CONF GLIBC_ETC "/resolv.conf"
 #define BIONIC_HELPER_LIBPATH "/system/lib64:/data/data/com.termux/files/usr/lib"
+#define BIONILUX_INTERNAL_BOX64_REL "bionilux/box64/bin/box64"
+#define BIONILUX_INTERNAL_BOX64_DIR_REL "bionilux/box64/bin"
 
 /*
  * x86_64 libraries live under the standard Linux multiarch path so
@@ -67,6 +71,12 @@
 #define ENVPREFIX(var, lit)	(strncmp((var), (lit), sizeof(lit) - 1) == 0)
 
 #define ARRAY_SIZE(a)	(sizeof(a) / sizeof((a)[0]))
+
+/* runtime toggle env vars */
+#define ENV_CLEANUP_STALE "BIONILUX_CLEANUP_STALE"
+#define ENV_WAKELOCK "BIONILUX_WAKELOCK"
+#define ENV_CHDIR_TO_BINARY "BIONILUX_CHDIR_TO_BINARY"
+#define ENV_BOX64_PATH "BIONILUX_BOX64"
 
 /* ── logging helpers ─────────────────────────────────────────────── */
 
@@ -194,6 +204,23 @@ out:
 	return info;
 }
 
+static int env_flag_enabled(const char *name, int default_value)
+{
+	const char *v = getenv(name);
+
+	if (!v || !*v)
+		return default_value;
+
+	if (!strcasecmp(v, "1") || !strcasecmp(v, "true") ||
+	    !strcasecmp(v, "yes") || !strcasecmp(v, "on"))
+		return 1;
+	if (!strcasecmp(v, "0") || !strcasecmp(v, "false") ||
+	    !strcasecmp(v, "no") || !strcasecmp(v, "off"))
+		return 0;
+
+	return default_value;
+}
+
 /* ── path resolution ─────────────────────────────────────────────── */
 
 /*
@@ -258,6 +285,23 @@ static const char *get_prefix(void)
 static char *find_box64(char *resolved, size_t size)
 {
 	char tmp[PATH_MAX];
+	const char *override = getenv(ENV_BOX64_PATH);
+
+	if (override && *override && access(override, X_OK) == 0) {
+		char *rp = realpath(override, resolved);
+		if (rp)
+			return rp;
+		snprintf(resolved, size, "%s", override);
+		return resolved;
+	}
+
+	snprintf(tmp, sizeof(tmp), "%s/%s",
+			 get_prefix(), BIONILUX_INTERNAL_BOX64_REL);
+	if (access(tmp, X_OK) == 0) {
+		char *rp = realpath(tmp, resolved);
+		if (rp)
+			return rp;
+	}
 
 	snprintf(tmp, sizeof(tmp), "%s/bin/box64", get_prefix());
 	if (access(tmp, X_OK) == 0) {
@@ -267,72 +311,6 @@ static char *find_box64(char *resolved, size_t size)
 	}
 
 	return find_in_path("box64", resolved, size);
-}
-
-/* ── box64 wrapper script ────────────────────────────────────────── */
-
-/*
- * When a child x86_64 process re-execs box64, box64 looks for itself
- * in BOX64_PATH.  We place a tiny shell wrapper at
- * $PREFIX/glibc/bin/box64 that invokes box64 through the glibc loader.
- */
-static void ensure_box64_wrapper(const char *real_box64)
-{
-	const char *prefix = get_prefix();
-	char wrapper[PATH_MAX], shebang[PATH_MAX], tmp_tpl[PATH_MAX];
-	struct stat st;
-	int fd;
-
-	snprintf(wrapper, sizeof(wrapper), "%s/glibc/bin/box64", prefix);
-	snprintf(shebang, sizeof(shebang), "#!%s/bin/sh", prefix);
-	snprintf(tmp_tpl, sizeof(tmp_tpl), "%s.glbtmp.XXXXXX", wrapper);
-
-	/* quick check: if wrapper exists and already mentions real box64, skip */
-	if (stat(wrapper, &st) == 0 && S_ISREG(st.st_mode) && (st.st_mode & 0111)) {
-		char line[512];
-		FILE *f = fopen(wrapper, "r");
-		if (f) {
-			/* read shebang + exec line */
-			if (fgets(line, sizeof(line), f) &&
-			    fgets(line, sizeof(line), f) &&
-			    strstr(line, real_box64)) {
-				fclose(f);
-				return; /* already up to date */
-			}
-			fclose(f);
-		}
-	}
-
-	fd = mkstemp(tmp_tpl);
-	if (fd < 0)
-		return;
-
-	{
-		char script[PATH_MAX * 2];
-		int n = snprintf(script, sizeof(script),
-				 "%s\nexec %s --library-path %s %s \"$@\"\n",
-				 shebang, GLIBC_LOADER, GLIBC_LIB, real_box64);
-		if (n <= 0 || (size_t)n >= sizeof(script) ||
-		    write(fd, script, (size_t)n) != (ssize_t)n) {
-			close(fd);
-			unlink(tmp_tpl);
-			return;
-		}
-	}
-
-	if (fchmod(fd, 0755) != 0) {
-		close(fd);
-		unlink(tmp_tpl);
-		return;
-	}
-
-	if (close(fd) != 0) {
-		unlink(tmp_tpl);
-		return;
-	}
-
-	if (rename(tmp_tpl, wrapper) != 0)
-		unlink(tmp_tpl);
 }
 
 /* ── preload library extraction ──────────────────────────────────── */
@@ -541,6 +519,7 @@ static char **build_environment(const char *preload_path, int for_box64,
 
 	if (for_box64) {
 		const char *user_b64_ld = getenv("BOX64_LD_LIBRARY_PATH");
+		const char *user_box64_path = getenv("BOX64_PATH");
 		const char *user_host_ld = getenv("LD_LIBRARY_PATH");
 
 		/* Never propagate ARM64 preload into box64/x86_64 context. */
@@ -556,31 +535,23 @@ static char **build_environment(const char *preload_path, int for_box64,
 		}
 		if (!env[j]) { free_env(env); return NULL; } j++;
 
-		if (user_b64_ld && *user_b64_ld) {
-			env[j] = xasprintf("BOX64_LD_LIBRARY_PATH=%s:%s",
-					   GLIBC_LIB_X86,
-					   user_b64_ld);
-		} else {
-			env[j] = xasprintf("BOX64_LD_LIBRARY_PATH=%s",
-					   GLIBC_LIB_X86);
-		}
-		if (!env[j]) { free_env(env); return NULL; } j++;
-
-		env[j] = xstrdup("BOX64_DYNAREC_SAFEFLAGS=1");
-		if (!env[j]) { free_env(env); return NULL; } j++;
-
-		env[j] = xstrdup("BOX64_WAITLOOP=1");
+		if (user_b64_ld && *user_b64_ld)
+			env[j] = xasprintf("BOX64_LD_LIBRARY_PATH=%s", user_b64_ld);
+		else
+			env[j] = xasprintf("BOX64_LD_LIBRARY_PATH=%s", GLIBC_LIB_X86);
 		if (!env[j]) { free_env(env); return NULL; } j++;
 
 		env[j] = xasprintf("RESOLV_CONF=%s", GLIBC_RESOLV_CONF);
 		if (!env[j]) { free_env(env); return NULL; } j++;
 
-		/* BOX64_PATH for child process re-exec */
-		env[j] = xasprintf("BOX64_PATH=%s/glibc/bin/:%s/bin/",
-				    get_prefix(), get_prefix());
-		if (!env[j]) { free_env(env); return NULL; } j++;
-
-		env[j] = xstrdup("BOX64_UNAME=x86_64");
+		if (user_box64_path && *user_box64_path) {
+			env[j] = xasprintf("BOX64_PATH=%s", user_box64_path);
+		} else {
+			env[j] = xasprintf("BOX64_PATH=%s/%s:%s/bin",
+					   get_prefix(),
+					   BIONILUX_INTERNAL_BOX64_DIR_REL,
+					   get_prefix());
+		}
 		if (!env[j]) { free_env(env); return NULL; } j++;
 
 		/*
@@ -609,8 +580,8 @@ static char **build_environment(const char *preload_path, int for_box64,
 /* ── wake lock ───────────────────────────────────────────────────── */
 
 /*
- * termux-wake-lock / termux-wake-unlock are fire-and-forget commands.
- * We fork, exec, wait — and that's it.  No PID tracking needed.
+ * termux-wake-lock / termux-wake-unlock are optional and disabled by
+ * default. When enabled we fork, exec and wait for completion.
  */
 static void run_wakelock_cmd(const char *cmd, int debug)
 {
@@ -636,7 +607,7 @@ static void run_wakelock_cmd(const char *cmd, int debug)
 		execl(path, cmd, (char *)NULL);
 		_exit(127);
 	} else if (pid > 0) {
-		waitpid(pid, &status, 0);
+		while (waitpid(pid, &status, 0) < 0 && errno == EINTR) { }
 		if (debug)
 			msg_ok("%s done", cmd);
 	}
@@ -644,76 +615,85 @@ static void run_wakelock_cmd(const char *cmd, int debug)
 
 static inline void acquire_wake_lock(int debug)
 {
+	if (!env_flag_enabled(ENV_WAKELOCK, 0))
+		return;
 	run_wakelock_cmd("termux-wake-lock", debug);
 }
 
 static inline void release_wake_lock(int debug)
 {
+	if (!env_flag_enabled(ENV_WAKELOCK, 0))
+		return;
 	run_wakelock_cmd("termux-wake-unlock", debug);
 }
 
 /* ── stale process cleanup ───────────────────────────────────────── */
 
 /*
- * Attempt to gracefully terminate any running instances of the target
- * binary. This prevents port conflicts and file lock issues after crashes.
- *
- * Strategy: SIGTERM → wait 2 seconds → SIGKILL if still running.
- * Non-blocking on failures (best-effort).
- * 
- * IMPORTANT: Filters to exclude current PID to avoid killing the bionilux
- * process itself (which appears in the command line).
+ * Optional stale cleanup: terminate running instances with the exact same
+ * executable path. Disabled by default and enabled via ENV_CLEANUP_STALE.
+ * This avoids shell expansion hazards and fixed startup delays.
  */
 static void cleanup_stale_processes(const char *binary_path, int debug)
 {
-	char cmd[PATH_MAX * 3];
-	char basename_buf[PATH_MAX];
-	const char *binary_name;
+	DIR *proc;
+	struct dirent *ent;
+	char target[PATH_MAX];
+	const char *target_path;
 	pid_t mypid = getpid();
-	int ret;
 
-	/* Extract basename for process matching. */
-	{
-		char *dup = strdup(binary_path);
-		if (!dup)
-			return;
-		binary_name = basename(dup);
-		if (!binary_name || strlen(binary_name) >= sizeof(basename_buf)) {
-			free(dup);
-			return;
-		}
-		strlcpy(basename_buf, binary_name, sizeof(basename_buf));
-		free(dup);
-		binary_name = basename_buf;
-	}
+	if (realpath(binary_path, target))
+		target_path = target;
+	else
+		target_path = binary_path;
 
 	if (debug)
-		msg_info("cleaning up stale processes: %s", binary_name);
+		msg_info("cleanup-stale enabled for: %s", target_path);
 
-	/* Attempt soft termination: SIGTERM.
-	 * Use a shell loop to exclude current PID.
-	 */
-	ret = snprintf(cmd, sizeof(cmd),
-		       "pgrep -f '%s' | while read pid; do [ \"$pid\" != \"%d\" ] && kill -TERM \"$pid\" 2>/dev/null || true; done",
-		       binary_name, (int)mypid);
-	if (ret > 0 && (size_t)ret < sizeof(cmd)) {
-		if (debug)
-			msg_ok("attempting soft kill of old processes");
-		system(cmd);
+	proc = opendir("/proc");
+	if (!proc)
+		return;
+
+	while ((ent = readdir(proc)) != NULL) {
+		char *end = NULL;
+		long pid_l;
+		pid_t pid;
+		char link_path[64];
+		char exe_path[PATH_MAX];
+		ssize_t n;
+
+		if (!isdigit((unsigned char)ent->d_name[0]))
+			continue;
+
+		pid_l = strtol(ent->d_name, &end, 10);
+		if (!end || *end != '\0' || pid_l <= 1)
+			continue;
+
+		pid = (pid_t)pid_l;
+		if (pid == mypid)
+			continue;
+
+		snprintf(link_path, sizeof(link_path), "/proc/%ld/exe", pid_l);
+		n = readlink(link_path, exe_path, sizeof(exe_path) - 1);
+		if (n <= 0)
+			continue;
+		exe_path[n] = '\0';
+
+		if (strcmp(exe_path, target_path) != 0)
+			continue;
+
+		if (kill(pid, SIGTERM) == 0 && debug)
+			msg_ok("sent SIGTERM to stale pid %ld", pid_l);
 	}
 
-	/* Wait briefly for graceful shutdown. */
-	sleep(2);
+	closedir(proc);
+}
 
-	/* Hard kill any remaining instances. */
-	ret = snprintf(cmd, sizeof(cmd),
-		       "pgrep -f '%s' | while read pid; do [ \"$pid\" != \"%d\" ] && kill -KILL \"$pid\" 2>/dev/null || true; done",
-		       binary_name, (int)mypid);
-	if (ret > 0 && (size_t)ret < sizeof(cmd)) {
-		if (debug)
-			msg_ok("attempting hard kill of remaining processes");
-		system(cmd);
-	}
+static void maybe_cleanup_stale_processes(const char *binary_path, int debug)
+{
+	if (!env_flag_enabled(ENV_CLEANUP_STALE, 0))
+		return;
+	cleanup_stale_processes(binary_path, debug);
 }
 
 /* ── signal forwarding ───────────────────────────────────────────── */
@@ -812,6 +792,7 @@ static int run_child(const char *exec_path, char **argv, char **envp,
 {
 	pid_t child;
 	int status;
+	int wait_rc;
 
 	acquire_wake_lock(debug);
 
@@ -826,7 +807,8 @@ static int run_child(const char *exec_path, char **argv, char **envp,
 	if (child == 0) {
 		/* child */
 		child_reset_signals();
-		chdir_to_binary(binary);
+		if (env_flag_enabled(ENV_CHDIR_TO_BINARY, 0))
+			chdir_to_binary(binary);
 		execve(exec_path, argv, envp);
 		msg_err("execve %s: %s", exec_path, strerror(errno));
 		_exit(127);
@@ -840,7 +822,16 @@ static int run_child(const char *exec_path, char **argv, char **envp,
 
 	/* parent — record PID so the handler can forward signals */
 	g_child_pid = (sig_atomic_t)child;
-	waitpid(child, &status, 0);
+	do {
+		wait_rc = waitpid(child, &status, 0);
+	} while (wait_rc < 0 && errno == EINTR);
+
+	if (wait_rc < 0) {
+		msg_err("waitpid failed: %s", strerror(errno));
+		release_wake_lock(debug);
+		return 1;
+	}
+
 	release_wake_lock(debug);
 
 	if (WIFEXITED(status))
@@ -848,6 +839,112 @@ static int run_child(const char *exec_path, char **argv, char **envp,
 	if (WIFSIGNALED(status))
 		return 128 + WTERMSIG(status);
 	return 1;
+}
+
+static int parse_shebang(const char *path, char *interp, size_t interp_sz,
+				 char *interp_arg, size_t interp_arg_sz)
+{
+	char buf[PATH_MAX + 64];
+	char *p, *q;
+	int fd;
+	ssize_t n;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return 0;
+
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n < 2)
+		return 0;
+
+	buf[n] = '\0';
+	if (buf[0] != '#' || buf[1] != '!')
+		return 0;
+
+	p = buf + 2;
+	while (*p == ' ' || *p == '\t')
+		p++;
+	if (*p == '\0' || *p == '\n' || *p == '\r')
+		return -1;
+
+	q = p;
+	while (*q && *q != ' ' && *q != '\t' && *q != '\n' && *q != '\r')
+		q++;
+
+	if ((size_t)(q - p) >= interp_sz)
+		return -1;
+	memcpy(interp, p, (size_t)(q - p));
+	interp[q - p] = '\0';
+
+	interp_arg[0] = '\0';
+	while (*q == ' ' || *q == '\t')
+		q++;
+	if (*q && *q != '\n' && *q != '\r') {
+		char *r = q;
+		size_t len;
+
+		while (*r && *r != '\n' && *r != '\r')
+			r++;
+		while (r > q && (r[-1] == ' ' || r[-1] == '\t'))
+			r--;
+
+		len = (size_t)(r - q);
+		if (len >= interp_arg_sz)
+			len = interp_arg_sz - 1;
+		memcpy(interp_arg, q, len);
+		interp_arg[len] = '\0';
+	}
+
+	return 1;
+}
+
+static int maybe_exec_script(const char *script_path, int argc,
+			     char *argv[], int arg_start, int debug)
+{
+	char interp[PATH_MAX], interp_arg[PATH_MAX];
+	char resolved_interp[PATH_MAX];
+	int rc;
+	size_t orig_argc, extra, k = 0;
+	char **av;
+
+	rc = parse_shebang(script_path, interp, sizeof(interp),
+			   interp_arg, sizeof(interp_arg));
+	if (rc == 0)
+		return -1;
+	if (rc < 0) {
+		msg_err("invalid shebang: %s", script_path);
+		return 1;
+	}
+
+	if (!find_in_path(interp, resolved_interp, sizeof(resolved_interp))) {
+		msg_err("interpreter not found: %s", interp);
+		return 127;
+	}
+
+	if (debug)
+		msg_info("script: %s via %s", script_path, resolved_interp);
+
+	orig_argc = (size_t)(argc - arg_start);
+	extra = interp_arg[0] ? 3 : 2;
+	av = calloc(orig_argc + extra, sizeof(char *));
+	if (!av) {
+		perror("calloc");
+		return 1;
+	}
+
+	av[k++] = resolved_interp;
+	if (interp_arg[0])
+		av[k++] = interp_arg;
+	av[k++] = (char *)script_path;
+	for (size_t i = 1; i < orig_argc; i++)
+		av[k++] = argv[arg_start + (int)i];
+	av[k] = NULL;
+
+	execv(resolved_interp, av);
+	msg_err("exec script interpreter failed: %s", strerror(errno));
+	free(av);
+	return errno == ENOENT ? 127 : 1;
 }
 
 /* ── CLI ─────────────────────────────────────────────────────────── */
@@ -935,7 +1032,14 @@ int main(int argc, char *argv[])
 
 	switch (info.arch) {
 	case ARCH_ERROR:   msg_err("cannot read: %s",              binary_path); return 1;
-	case ARCH_NOT_ELF: msg_err("not an ELF binary: %s",       binary_path); return 1;
+	case ARCH_NOT_ELF: {
+		int script_rc = maybe_exec_script(binary_path, argc, argv,
+						 arg_start, debug);
+		if (script_rc >= 0)
+			return script_rc;
+		msg_err("not an ELF binary: %s", binary_path);
+		return 1;
+	}
 	case ARCH_UNKNOWN: msg_err("unsupported architecture: %s", binary_path); return 1;
 	default: break;
 	}
@@ -989,8 +1093,6 @@ int main(int argc, char *argv[])
 			return 127;
 		}
 
-		ensure_box64_wrapper(box64_path);
-
 		binary_info_t b64 = analyze_binary(box64_path);
 		int b64_glibc = (b64.interp == INTERP_GLIBC);
 
@@ -1029,7 +1131,7 @@ int main(int argc, char *argv[])
 			av[k++] = argv[arg_start + (int)i];
 		av[k] = NULL;
 
-		cleanup_stale_processes(binary_path, debug);
+		maybe_cleanup_stale_processes(binary_path, debug);
 		int rc = run_child(exec_path, av, env, binary_path, debug);
 		free(av);
 		free_env(env);
@@ -1039,10 +1141,10 @@ int main(int argc, char *argv[])
 	/* ── arm64 ────────────────────────────────────────────────── */
 	if (info.arch == ARCH_AARCH64) {
 
-		/* native bionic → just exec directly */
-		if (info.interp == INTERP_BIONIC) {
+		/* native bionic or static ELF → exec directly */
+		if (info.interp == INTERP_BIONIC || info.interp == INTERP_NONE) {
 			if (debug)
-				msg_info("native bionic binary, exec directly");
+				msg_info("direct execution path");
 			execv(binary_path, &argv[arg_start]);
 			perror("execv");
 			return 1;
@@ -1085,7 +1187,7 @@ int main(int argc, char *argv[])
 			msg_info("exec: %s --library-path %s %s",
 				 GLIBC_LOADER, GLIBC_LIB, binary_path);
 
-		cleanup_stale_processes(binary_path, debug);
+		maybe_cleanup_stale_processes(binary_path, debug);
 		int rc = run_child(GLIBC_LOADER, av, env, binary_path, debug);
 		free(av);
 		free_env(env);

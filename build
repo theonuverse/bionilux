@@ -16,7 +16,7 @@ PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 GLIBC_PREFIX="$PREFIX/glibc"
 
 X86_LIB_DIR="$GLIBC_PREFIX/lib/x86_64-linux-gnu"
-BOX64_DEST="$PREFIX/bin/box64"
+BOX64_DEST="$PREFIX/bionilux/box64/bin/box64"
 PRELOAD_DEST="$GLIBC_PREFIX/lib/libbionilux_preload.so"
 BIONILUX_DEST="$PREFIX/bin/bionilux"
 
@@ -37,7 +37,6 @@ do_clean() {
     info "Cleaning old installation..."
     rm -f  "$BIONILUX_DEST"                         2>/dev/null || true
     rm -f  "$PRELOAD_DEST"                      2>/dev/null || true
-    rm -f  "$GLIBC_PREFIX/bin/box64"            2>/dev/null || true
     rm -f  "$BOX64_DEST"                        2>/dev/null || true
     rm -rf "$GLIBC_PREFIX/lib_x86_64"           2>/dev/null || true
     rm -rf "$X86_LIB_DIR"                       2>/dev/null || true
@@ -97,12 +96,7 @@ else
         || die "Download failed: $ARCHIVE_NAME"
 
     mkdir -p "$X86_LIB_DIR"
-    tar --exclude='engines-3' \
-        --exclude='gconv' \
-        --exclude='ossl-modules' \
-        --exclude='perl-base' \
-        --exclude='security' \
-        -xf "$tmpdir/$ARCHIVE_NAME" \
+    tar -xf "$tmpdir/$ARCHIVE_NAME" \
         --strip-components=4 \
         -C "$X86_LIB_DIR" \
         debian-trixie-x86_64/usr/lib/x86_64-linux-gnu \
@@ -114,6 +108,8 @@ fi
 
 # ── step 0b: box64 ──────────────────────────────────────────────────
 info "Checking box64..."
+
+mkdir -p "$(dirname "$BOX64_DEST")"
 
 if [ -x "$BOX64_DEST" ]; then
     info "Already present — skipping"
@@ -139,8 +135,6 @@ else
     rm -rf "$tmpdir/box64.deb" "$tmpdir/box64_out"
     ok "Installed box64 → $BOX64_DEST"
 fi
-
-mkdir -p "$GLIBC_PREFIX/bin"
 
 # ── step 1: preload library (glibc sysroot) ─────────────────────────
 info "Step 1: Building preload library..."

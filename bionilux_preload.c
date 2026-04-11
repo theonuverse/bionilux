@@ -80,6 +80,9 @@ static void debug_print(const char *fmt, ...)
 /* ── real function pointers (set in constructor) ─────────────────── */
 
 static int     (*real_execve)(const char *, char *const[], char *const[]);
+static int     (*real_execveat)(int, const char *, char *const[],
+				char *const[], int);
+static int     (*real_fexecve)(int, char *const[], char *const[]);
 static ssize_t (*real_readlink)(const char *, char *, size_t);
 static ssize_t (*real_readlinkat)(int, const char *, char *, size_t);
 static int     (*real_open)(const char *, int, ...);
@@ -98,6 +101,23 @@ static int fallback_execve(const char *path, char *const argv[],
 	return (int)syscall(SYS_execve, path, argv, envp);
 }
 
+static int fallback_execveat(int dirfd, const char *path,
+			     char *const argv[], char *const envp[],
+			     int flags)
+{
+#ifdef SYS_execveat
+	return (int)syscall(SYS_execveat, dirfd, path, argv, envp, flags);
+#else
+	(void)dirfd;
+	(void)path;
+	(void)argv;
+	(void)envp;
+	(void)flags;
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
 /*
  * Safe wrapper: calls real_execve if resolved, otherwise falls back
  * to the raw syscall.  Never crashes on NULL function pointer.
@@ -108,6 +128,15 @@ static inline int safe_execve(const char *path, char *const argv[],
 	if (real_execve)
 		return real_execve(path, argv, envp);
 	return fallback_execve(path, argv, envp);
+}
+
+static inline int safe_execveat(int dirfd, const char *path,
+				char *const argv[], char *const envp[],
+				int flags)
+{
+	if (real_execveat)
+		return real_execveat(dirfd, path, argv, envp, flags);
+	return fallback_execveat(dirfd, path, argv, envp, flags);
 }
 
 /* ── open/openat path redirect for NSS/FHS ──────────────────────── */
@@ -543,7 +572,10 @@ static int has_path_suffix(const char *path, const char *suffix)
 static int is_native_helper_exec(const char *resolved)
 {
 	return has_path_suffix(resolved, "/usr/bin/sh") ||
-	       has_path_suffix(resolved, "/usr/bin/lscpu");
+	       has_path_suffix(resolved, "/bin/sh") ||
+	       has_path_suffix(resolved, "/system/bin/sh") ||
+	       has_path_suffix(resolved, "/usr/bin/lscpu") ||
+	       has_path_suffix(resolved, "/bin/lscpu");
 }
 
 /* ── hooked exec functions ───────────────────────────────────────── */
@@ -742,6 +774,41 @@ int execle(const char *pathname, const char *arg, ... /*, char *const envp[] */)
 	return ret;
 }
 
+int execveat(int dirfd, const char *pathname, char *const argv[],
+	    char *const envp[], int flags)
+{
+	char fd_path[64];
+
+	if (pathname && pathname[0] == '/')
+		return execve(pathname, argv, envp);
+
+	if (dirfd == AT_FDCWD && pathname && !(flags & AT_EMPTY_PATH))
+		return execve(pathname, argv, envp);
+
+	if ((flags & AT_EMPTY_PATH) && pathname && pathname[0] == '\0') {
+		snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", dirfd);
+		return execve(fd_path, argv, envp);
+	}
+
+	return safe_execveat(dirfd, pathname, argv, envp, flags);
+}
+
+int fexecve(int fd, char *const argv[], char *const envp[])
+{
+	char fd_path[64];
+	int ret;
+
+	snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
+	ret = execve(fd_path, argv, envp);
+	if (ret == 0)
+		return ret;
+
+	if (real_fexecve)
+		return real_fexecve(fd, argv, envp);
+
+	return safe_execveat(fd, "", argv, envp, AT_EMPTY_PATH);
+}
+
 /* ── hooked open/open64/openat/openat64 ─────────────────────────── */
 
 int open(const char *pathname, int flags, ...)
@@ -931,6 +998,14 @@ static void init(void)
 	*(void **)&real_execve = dlsym(RTLD_NEXT, "execve");
 	if (!real_execve)
 		constructor_warn("execve", dlerror());
+
+	*(void **)&real_execveat = dlsym(RTLD_NEXT, "execveat");
+	if (!real_execveat)
+		constructor_warn("execveat", dlerror());
+
+	*(void **)&real_fexecve = dlsym(RTLD_NEXT, "fexecve");
+	if (!real_fexecve)
+		constructor_warn("fexecve", dlerror());
 
 	*(void **)&real_readlink = dlsym(RTLD_NEXT, "readlink");
 	if (!real_readlink)

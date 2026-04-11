@@ -64,7 +64,7 @@ The build script installs:
 |----------|-------------|
 | `bionilux` | `$PREFIX/bin/` |
 | `libbionilux_preload.so` | `$PREFIX/glibc/lib/` |
-| `box64` | `$PREFIX/bin/` |
+| `box64` (bundled) | `$PREFIX/bionilux/box64/bin/` |
 | x86\_64 compat libs | `$PREFIX/glibc/lib/x86_64-linux-gnu/` |
 
 ## Usage
@@ -109,6 +109,10 @@ bionilux -n ./static_hello
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BOX64_LD_LIBRARY_PATH` | `$PREFIX/glibc/lib/x86_64-linux-gnu` | x86\_64 library search path |
+| `BIONILUX_BOX64` | *(unset)* | Explicit path to `box64` binary (overrides auto-discovery) |
+| `BIONILUX_CLEANUP_STALE` | `0` | Set to `1` to terminate stale processes with the exact same executable path |
+| `BIONILUX_WAKELOCK` | `0` | Set to `1` to run `termux-wake-lock`/`termux-wake-unlock` around execution |
+| `BIONILUX_CHDIR_TO_BINARY` | `0` | Set to `1` to change working directory to the target binary's directory |
 | `BIONILUX_GLIBC_LIB` | `$PREFIX/glibc/lib` | glibc ARM64 library path |
 | `BIONILUX_GLIBC_LOADER` | `$PREFIX/glibc/lib/ld-linux-aarch64.so.1` | glibc dynamic linker |
 | `BIONILUX_DEBUG` | *(unset)* | Set to `1` for debug output |
@@ -143,6 +147,8 @@ bionilux uses `pread()` to inspect an ELF binary **without** loading the entire 
 | `execv()` | Wrapper → `execve()` |
 | `execvp()` | PATH resolution + `execve()` |
 | `execvpe()` | PATH resolution + `execve()` with custom envp |
+| `execveat()` | Routes absolute / AT_FDCWD path execution through the same glibc logic |
+| `fexecve()` | Re-routes fd-based execution through `/proc/self/fd/<n>` |
 | `readlink()` | Returns `BIONILUX_ORIG_EXE` for `/proc/self/exe` |
 | `readlinkat()` | Same fix using `fd` + path |
 
@@ -166,6 +172,14 @@ Enable debug mode to trace the preload library's decisions:
 bionilux -d ./program
 ```
 
+If you intentionally need old process cleanup behavior, opt in explicitly:
+
+```bash
+BIONILUX_CLEANUP_STALE=1 bionilux ./program
+```
+
+By default cleanup is disabled to avoid startup delay and accidental termination of unrelated processes.
+
 ### Missing x86\_64 libraries
 
 Ensure the compat libraries are present:
@@ -173,6 +187,12 @@ Ensure the compat libraries are present:
 ```bash
 ls "$PREFIX/glibc/lib/x86_64-linux-gnu/"
 # Expected: libgcc_s.so.1  libstdc++.so.6  libssl.so.1.1 …
+```
+
+If bundled `box64` is missing, verify:
+
+```bash
+ls "$PREFIX/bionilux/box64/bin/box64"
 ```
 
 If they are missing, re-run the build script or download them manually into
