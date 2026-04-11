@@ -233,35 +233,6 @@ ls "$PREFIX/bionilux/box64/bin/box64.real"
 If they are missing, re-run the build script or download them manually into
 `$PREFIX/glibc/lib/x86_64-linux-gnu/`.
 
-## Release Workflow
-
-After building and pushing changes:
-
-1. Build and verify locally:
-
-```bash
-./build -c
-bionilux --version
-```
-
-2. Run smoke tests (arm64 glibc binary and at least one x86_64 binary).
-
-3. Commit and push to `main`.
-
-4. Create a tag and release:
-
-```bash
-git tag -a v0.3.0 -m "bionilux v0.3.0"
-git push origin v0.3.0
-```
-
-5. Upload release assets:
-  - `bionilux`
-  - `libbionilux_preload.so`
-  - `SHA256SUMS` (recommended)
-
-6. Verify the installer resolves the intended release and downloads assets.
-
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
