@@ -26,13 +26,8 @@ PRELOAD="$PROJECT/libbionilux_preload.so"
 
 # Warn if hooks.c is newer than the preload we're testing.
 if [ "$PROJECT/src/preload/hooks.c" -nt "$PRELOAD" ]; then
-    echo "hooks.c is newer than $PRELOAD — rebuild before testing:"
-    echo "  clang --target=aarch64-linux-gnu -shared -fPIC -O2 -nostdlib \\"
-    echo "        -isystem \$GLIBC/include -o $PRELOAD \\"
-    echo "        src/preload/hooks.c \\"
-    echo "        \$GLIBC/lib/libc.so.6 \$GLIBC/lib/libdl.so.2 \\"
-    echo "        -Wl,--dynamic-linker=\$GLIBC/lib/ld-linux-aarch64.so.1 \\"
-    echo "        -Wl,-rpath,\$GLIBC/lib"
+    echo "hooks.c is newer than $PRELOAD — rebuild first:"
+    echo "  $PROJECT/scripts/build-preload.sh"
     exit 1
 fi
 
@@ -58,7 +53,12 @@ info "building helpers"
 build_glibc_bin "$PROJECT/tests/helpers/execle.c"    "$TMP/execle_test" || exit 1
 build_glibc_bin "$PROJECT/tests/helpers/self_call.c" "$TMP/self_call"   || exit 1
 build_glibc_bin "$PROJECT/tests/helpers/fexecve.c"   "$TMP/fexecve_test" || exit 1
-pass "built 3 helpers"
+build_glibc_bin "$PROJECT/tests/helpers/exit_code.c"        "$TMP/exit_code_test"        || exit 1
+build_glibc_bin "$PROJECT/tests/helpers/print_argv0.c"      "$TMP/print_argv0_test"      || exit 1
+build_glibc_bin "$PROJECT/tests/helpers/execvp_missing.c"   "$TMP/execvp_missing_test"   || exit 1
+build_glibc_bin "$PROJECT/tests/helpers/system_test.c"      "$TMP/system_test"           || exit 1
+build_glibc_bin "$PROJECT/tests/helpers/getifaddrs_test.c"  "$TMP/getifaddrs_test"       || exit 1
+pass "built 8 helpers"
 
 # ─── 1. execle with multiple args + custom envp ─────────────────────
 out=$(BIONILUX_DEBUG= "$BIONILUX" "$TMP/execle_test" 2>/dev/null || true)
@@ -110,7 +110,57 @@ else
     fail "shebang recursion limit: got '$out'"
 fi
 
-# ─── 6. missing path → shell ENOENT ─────────────────────────────────
+# ─── 6. exit code propagates ────────────────────────────────────────
+"$BIONILUX" "$TMP/exit_code_test" >/dev/null 2>&1
+rc=$?
+if [ $rc -eq 42 ]; then
+    pass "exit code 42 propagated"
+else
+    fail "exit code: expected 42, got $rc"
+fi
+
+# ─── 7. argv[0] preserved when called directly ──────────────────────
+out=$("$BIONILUX" "$TMP/print_argv0_test" 2>/dev/null || true)
+if echo "$out" | grep -q "argv0=$TMP/print_argv0_test"; then
+    pass "argv[0] preserved (direct)"
+else
+    fail "argv[0] preserved (direct): got '$out'"
+fi
+
+# ─── 8. exec -a name from shell ─────────────────────────────────────
+out=$("$BIONILUX" "$GLIBC/bin/bash" -c \
+      "exec -a customname $TMP/print_argv0_test" 2>/dev/null || true)
+if echo "$out" | grep -q "argv0=customname"; then
+    pass "exec -a preserves custom argv[0]"
+else
+    fail "exec -a: got '$out'"
+fi
+
+# ─── 9. execvp on missing name returns ENOENT to caller ─────────────
+out=$("$BIONILUX" "$TMP/execvp_missing_test" 2>/dev/null || true)
+if [ "$out" = "enoent-ok" ]; then
+    pass "execvp missing name -> ENOENT"
+else
+    fail "execvp missing name: got '$out'"
+fi
+
+# ─── 10. system() runs ──────────────────────────────────────────────
+out=$("$BIONILUX" "$TMP/system_test" 2>/dev/null || true)
+if echo "$out" | grep -q "system-ok"; then
+    pass "system() works"
+else
+    fail "system(): got '$out'"
+fi
+
+# ─── 11. getifaddrs returns IPv4 interfaces ─────────────────────────
+out=$("$BIONILUX" "$TMP/getifaddrs_test" 2>/dev/null || true)
+if echo "$out" | grep -q "ifaddrs-ok"; then
+    pass "getifaddrs fallback"
+else
+    fail "getifaddrs: got '$out'"
+fi
+
+# ─── 12. missing path → shell ENOENT ─────────────────────────────────
 # Distinguish shell's "No such file or directory" from launcher's
 # "command not found": only the former proves the hook passed through.
 out=$("$BIONILUX" "$GLIBC/bin/bash" -c '/no/such/path' 2>&1 || true)
@@ -120,7 +170,7 @@ else
     fail "missing path -> shell ENOENT (got '$out')"
 fi
 
-# ─── 7. box64 chain (optional) ──────────────────────────────────────
+# ─── 13. box64 chain (optional) ──────────────────────────────────────
 if [ -x "$BOX64" ] && [ -f "$HOME/server/bedrock_server" ]; then
     timeout 3 "$BIONILUX" "$HOME/server/bedrock_server" >/dev/null 2>&1
     rc=$?

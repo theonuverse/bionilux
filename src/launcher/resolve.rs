@@ -1,36 +1,13 @@
-use std::env;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use crate::analyzer::elf::{self, EM_AARCH64, EM_X86_64, Libc};
 use crate::debug;
+use crate::launcher::config::RuntimeConfig;
 
-const DEFAULT_PREFIX: &str = "/data/data/com.termux/files/usr";
 const MAX_SHEBANG_DEPTH: u32 = 4;
-
-fn prefix() -> &'static str {
-    static CACHE: OnceLock<String> = OnceLock::new();
-    CACHE.get_or_init(|| env::var("PREFIX").unwrap_or_else(|_| DEFAULT_PREFIX.into()))
-}
-
-fn glibc_dir() -> PathBuf {
-    PathBuf::from(prefix()).join("glibc")
-}
-
-fn box64_path() -> PathBuf {
-    PathBuf::from(prefix()).join("bionilux/box64-glibc")
-}
-
-fn termux_bin() -> PathBuf {
-    PathBuf::from(prefix()).join("bin")
-}
-
-fn default_loader() -> PathBuf {
-    glibc_dir().join("lib/ld-linux-aarch64.so.1")
-}
 
 pub struct Execution {
     pub exec_target: PathBuf,
@@ -44,7 +21,7 @@ pub struct Execution {
 pub enum Error {
     NotFound(String),
     NoPreload,
-    NoBox64,
+    NoBox64(PathBuf),
     Unsupported(String),
 }
 
@@ -62,23 +39,28 @@ impl fmt::Display for Error {
         match self {
             Error::NotFound(n) => write!(f, "command not found: {n}"),
             Error::NoPreload => write!(f, "libbionilux_preload.so not found"),
-            Error::NoBox64 => write!(f, "box64 not found at {}", box64_path().display()),
+            Error::NoBox64(p) => write!(f, "box64 not found at {}", p.display()),
             Error::Unsupported(m) => write!(f, "unsupported: {m}"),
         }
     }
 }
 
 // Four outcomes: native, glibc-aarch64 (loader), glibc-x86_64 (box64), shebang.
-pub fn resolve(raw: &str, args: &[String]) -> Result<Execution, Error> {
-    resolve_at(raw, args, 0)
+pub fn resolve(raw: &str, args: &[String], config: &RuntimeConfig) -> Result<Execution, Error> {
+    resolve_at(raw, args, config, 0)
 }
 
-fn resolve_at(raw: &str, args: &[String], depth: u32) -> Result<Execution, Error> {
+fn resolve_at(
+    raw: &str,
+    args: &[String],
+    config: &RuntimeConfig,
+    depth: u32,
+) -> Result<Execution, Error> {
     let target = which::which(raw).map_err(|_| Error::NotFound(raw.into()))?;
     debug!("resolved: {}", target.display());
 
     let Some(info) = elf::analyze(&target) else {
-        return script(&target, args, depth);
+        return script(&target, args, config, depth);
     };
 
     if matches!(info.libc, Libc::Musl | Libc::Other) {
@@ -109,9 +91,9 @@ fn resolve_at(raw: &str, args: &[String], depth: u32) -> Result<Execution, Error
 
     // Needs the glibc loader; x86_64 also needs box64 in front.
     let (exec_target, argv) = if is_x86 {
-        let box64 = box64_path();
+        let box64 = config.box64.clone();
         if !box64.exists() {
-            return Err(Error::NoBox64);
+            return Err(Error::NoBox64(box64));
         }
         debug!("x86_64 glibc -> box64");
         // argv[0] must be box64's full path — box64 uses it to find itself.
@@ -127,15 +109,16 @@ fn resolve_at(raw: &str, args: &[String], depth: u32) -> Result<Execution, Error
     };
 
     let interp = if is_x86 {
-        default_loader().to_string_lossy().into_owned()
+        config.loader.to_string_lossy().into_owned()
     } else {
         info.interpreter
             .clone()
-            .unwrap_or_else(|| default_loader().to_string_lossy().into_owned())
+            .unwrap_or_else(|| config.loader.to_string_lossy().into_owned())
     };
-    let loader = find_loader(&interp)
+    let loader = config
+        .find_loader(&interp)
         .ok_or_else(|| Error::Unsupported(format!("loader {interp} missing")))?;
-    let preload = find_preload().ok_or(Error::NoPreload)?;
+    let preload = config.find_preload().ok_or(Error::NoPreload)?;
 
     Ok(Execution {
         exec_target,
@@ -147,43 +130,13 @@ fn resolve_at(raw: &str, args: &[String], depth: u32) -> Result<Execution, Error
     })
 }
 
-// Ubuntu PT_INTERP says /lib/...; Termux stores it under $GLIBC/lib.
-fn find_loader(interp: &str) -> Option<PathBuf> {
-    let p = PathBuf::from(interp);
-    if p.exists() {
-        return Some(p);
-    }
-    let name = p.file_name()?;
-    let alt = glibc_dir().join("lib").join(name);
-    alt.exists().then_some(alt)
-}
-
-fn find_preload() -> Option<PathBuf> {
-    if let Ok(p) = env::var("BIONILUX_PRELOAD") {
-        let p = PathBuf::from(p);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    // Walk up from the current exe (dev: target/debug/bionilux -> project root).
-    if let Ok(exe) = env::current_exe() {
-        let mut dir = exe.parent();
-        for _ in 0..3 {
-            let Some(d) = dir else { break };
-            let p = d.join("libbionilux_preload.so");
-            if p.exists() {
-                return Some(p);
-            }
-            dir = d.parent();
-        }
-    }
-    // Installed alongside glibc.
-    let p = glibc_dir().join("lib/libbionilux_preload.so");
-    p.exists().then_some(p)
-}
-
 // Shebang script: resolve the interpreter, then rebuild argv.
-fn script(script: &Path, args: &[String], depth: u32) -> Result<Execution, Error> {
+fn script(
+    script: &Path,
+    args: &[String],
+    config: &RuntimeConfig,
+    depth: u32,
+) -> Result<Execution, Error> {
     if depth >= MAX_SHEBANG_DEPTH {
         return Err(Error::Unsupported("shebang recursion too deep".into()));
     }
@@ -191,7 +144,7 @@ fn script(script: &Path, args: &[String], depth: u32) -> Result<Execution, Error
     let (interp, interp_arg) =
         parse_shebang(script).ok_or_else(|| Error::Unsupported("not ELF or shebang".into()))?;
 
-    let interp = rewrite_termux(&interp);
+    let interp = rewrite_termux(&interp, config);
 
     // `#!/usr/bin/env prog` — resolve prog directly instead of running env,
     // because env is native bionic and would bypass our rerouting.
@@ -224,7 +177,7 @@ fn script(script: &Path, args: &[String], depth: u32) -> Result<Execution, Error
     let interp_str = interp_path
         .to_str()
         .ok_or_else(|| Error::Unsupported("non-UTF-8 interpreter path".into()))?;
-    let inner = resolve_at(interp_str, std::slice::from_ref(&interp), depth + 1)?;
+    let inner = resolve_at(interp_str, std::slice::from_ref(&interp), config, depth + 1)?;
 
     // Start from inner.argv — preserves [BOX64, interp] for x86_64 interpreters.
     let mut argv = inner.argv.clone();
@@ -245,8 +198,8 @@ fn script(script: &Path, args: &[String], depth: u32) -> Result<Execution, Error
 }
 
 // Termux has no /bin or /usr/bin.
-fn rewrite_termux(p: &str) -> String {
-    let bin = termux_bin();
+fn rewrite_termux(p: &str, config: &RuntimeConfig) -> String {
+    let bin = &config.termux_bin;
     for prefix in ["/bin/", "/usr/bin/"] {
         if let Some(rest) = p.strip_prefix(prefix) {
             return format!("{}/{}", bin.display(), rest);
@@ -284,26 +237,33 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    fn test_config() -> RuntimeConfig {
+        RuntimeConfig::with_prefix(PathBuf::from("/test/prefix"))
+    }
+
     // ── rewrite_termux ──────────────────────────────────────────────
 
     #[test]
     fn rewrite_bin_prefix() {
-        assert_eq!(rewrite_termux("/bin/sh"), format!("{}/bin/sh", prefix()));
+        let c = test_config();
+        assert_eq!(rewrite_termux("/bin/sh", &c), "/test/prefix/bin/sh");
     }
 
     #[test]
     fn rewrite_usr_bin_prefix() {
+        let c = test_config();
         assert_eq!(
-            rewrite_termux("/usr/bin/python3"),
-            format!("{}/bin/python3", prefix())
+            rewrite_termux("/usr/bin/python3", &c),
+            "/test/prefix/bin/python3"
         );
     }
 
     #[test]
     fn rewrite_leaves_other_paths_alone() {
-        assert_eq!(rewrite_termux("/opt/foo/bar"), "/opt/foo/bar");
-        assert_eq!(rewrite_termux("sh"), "sh");
-        assert_eq!(rewrite_termux("/usr/local/bin/x"), "/usr/local/bin/x");
+        let c = test_config();
+        assert_eq!(rewrite_termux("/opt/foo/bar", &c), "/opt/foo/bar");
+        assert_eq!(rewrite_termux("sh", &c), "sh");
+        assert_eq!(rewrite_termux("/usr/local/bin/x", &c), "/usr/local/bin/x");
     }
 
     // ── parse_shebang ───────────────────────────────────────────────
@@ -363,24 +323,5 @@ mod tests {
         let (interp, arg) = parse_shebang(f.path()).unwrap();
         assert_eq!(interp, "/bin/sh");
         assert!(arg.is_none());
-    }
-
-    // ── find_loader ─────────────────────────────────────────────────
-
-    #[test]
-    fn find_loader_missing() {
-        assert!(find_loader("/nonexistent/foo/ld-fake.so").is_none());
-    }
-
-    #[test]
-    fn find_loader_falls_back_to_glibc_dir() {
-        let loader = default_loader();
-        let fallback = glibc_dir().join("lib").join("ld-linux-aarch64.so.1");
-        let result = find_loader(&loader.to_string_lossy());
-        if fallback.exists() {
-            assert_eq!(result.as_deref(), Some(fallback.as_path()));
-        } else {
-            assert!(result.is_none());
-        }
     }
 }
