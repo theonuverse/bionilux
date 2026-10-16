@@ -6,6 +6,8 @@ mod analyzer;
 mod debug;
 mod launcher;
 
+use launcher::config::RuntimeConfig;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "bionilux",
@@ -18,6 +20,7 @@ mod launcher;
         bionilux $PREFIX/glibc/bin/bash         # glibc shell\n  \
         BIONILUX_DEBUG=1 bionilux ./my_app      # verbose\n  \
         bionilux -n ./static_glibc_binary       # skip preload injection\n  \
+        bionilux --print-config                 # show resolved runtime paths\n  \
         bionilux ls -la                         # pass args through"
 )]
 struct Cli {
@@ -29,8 +32,12 @@ struct Cli {
     #[arg(short = 'n', long = "no-preload")]
     no_preload: bool,
 
+    /// Print resolved runtime paths and exit
+    #[arg(long = "print-config")]
+    print_config: bool,
+
     /// Target binary to run
-    binary: String,
+    binary: Option<String>,
 
     /// Arguments passed to the target binary
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -41,10 +48,22 @@ fn main() {
     let cli = Cli::parse();
     debug::init(cli.debug);
 
-    let mut all_args = vec![cli.binary.clone()];
+    let config = RuntimeConfig::from_env();
+
+    if cli.print_config {
+        print!("{}", config.format());
+        return;
+    }
+
+    let Some(binary) = cli.binary else {
+        eprintln!("error: missing target binary");
+        exit(2);
+    };
+
+    let mut all_args = vec![binary.clone()];
     all_args.extend(cli.args.iter().cloned());
 
-    let mut execution = match launcher::resolve::resolve(&cli.binary, &all_args) {
+    let mut execution = match launcher::resolve::resolve(&binary, &all_args, &config) {
         Ok(e) => e,
         Err(err) => {
             eprintln!("error: {err}");
@@ -68,6 +87,7 @@ fn main() {
         &execution.exec_target,
         &current_exe,
         execution.is_x86_64,
+        &config,
     );
 
     if let Err(e) = launcher::exec::execute(

@@ -21,7 +21,14 @@ pub fn execute(
         let _ = std::env::set_current_dir(dir);
     }
 
-    let argv0 = argv.first().map(String::as_str).unwrap_or("");
+    // The hook passes the caller's argv[0] via BIONILUX_ARGV0 so login
+    // shells (-bash), exec -a, and multicall binaries see their real name.
+    let argv0_owned = std::env::var("BIONILUX_ARGV0").ok();
+    let argv0 = argv0_owned
+        .as_deref()
+        .or_else(|| argv.first().map(String::as_str))
+        .unwrap_or("");
+
     let c_env: Vec<CString> = env
         .iter()
         .map(|e| cstring_arg(e, "environment entry"))
@@ -42,10 +49,13 @@ pub fn execute(
             (c_ld, v)
         }
         None => {
-            let v = argv
-                .iter()
-                .map(|a| cstring_arg(a, "argument"))
-                .collect::<Result<_, _>>()?;
+            let mut v = Vec::with_capacity(argv.len());
+            if !argv0.is_empty() {
+                v.push(cstring_arg(argv0, "argv[0]")?);
+            }
+            for a in argv.iter().skip(1) {
+                v.push(cstring_arg(a, "argument")?);
+            }
             (c_target, v)
         }
     };

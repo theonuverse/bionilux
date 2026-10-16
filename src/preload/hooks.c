@@ -61,19 +61,77 @@ static char **strip_ld_preload(char *const envp[]) {
     return ev;
 }
 
-// Build [launcher, target, argv[1..]] with a stripped envp.
+// Envp for the child: strips LD_PRELOAD and stale BIONILUX_ARGV0,
+// appends BIONILUX_ARGV0=<argv0> so the launcher can restore the
+// caller's argv[0]. Caller frees the array; the BIONILUX_ARGV0 string
+// points into a thread-local buffer.
+static char **build_child_envp(char *const envp[], const char *argv0) {
+    size_t envc = 0;
+    while (envp && envp[envc]) envc++;
+
+    char **ev = malloc((envc + 2) * sizeof *ev);
+    if (!ev) return NULL;
+
+    size_t j = 0;
+    for (size_t i = 0; i < envc; i++) {
+        if (strncmp(envp[i], "LD_PRELOAD=", 11) == 0) continue;
+        if (strncmp(envp[i], "BIONILUX_ARGV0=", 15) == 0) continue;
+        ev[j++] = envp[i];
+    }
+
+    if (argv0) {
+        static __thread char argv0_buf[PATH_MAX + 16];
+        int n = snprintf(argv0_buf, sizeof argv0_buf, "BIONILUX_ARGV0=%s", argv0);
+        if (n > 0 && (size_t)n < sizeof argv0_buf)
+            ev[j++] = argv0_buf;
+    }
+    ev[j] = NULL;
+    return ev;
+}
+
+// Look up a bare name in PATH. Returns 0 if found, -1 otherwise.
+static int resolve_bare_name(const char *name, char *buf, size_t size) {
+    const char *path = getenv("PATH");
+    if (!path || !*path) return -1;
+
+    char *dup = strdup(path);
+    if (!dup) return -1;
+
+    int found = -1;
+    char *save = NULL;
+    for (char *dir = strtok_r(dup, ":", &save);
+         dir;
+         dir = strtok_r(NULL, ":", &save)) {
+        int n = snprintf(buf, size, "%s/%s", dir, name);
+        if (n > 0 && (size_t)n < size && access(buf, X_OK) == 0) {
+            found = 0;
+            break;
+        }
+    }
+    free(dup);
+    return found;
+}
+
+// Build [launcher, target, argv[1..]] with a stripped envp. Returns 1
+// on reroute, 0 to pass through so the caller sees ENOENT synchronously.
 static int reroute(const char *target, char *const argv[], char *const envp[],
                    const char **launcher, char ***nargv, char ***nenvp) {
     *launcher = getenv("BIONILUX_BINARY_PATH");
     if (!*launcher || !target || is_launcher(target, *launcher)) return 0;
-    if (strchr(target, '/') && access(target, X_OK) != 0) return 0;
+
+    if (strchr(target, '/')) {
+        if (access(target, X_OK) != 0) return 0;
+    } else {
+        char resolved[PATH_MAX];
+        if (resolve_bare_name(target, resolved, sizeof resolved) != 0) return 0;
+    }
 
     size_t argc = 0;
     while (argv && argv[argc]) argc++;
     size_t n = argc ? argc : 1;
 
     char **av = malloc((n + 2) * sizeof *av);
-    char **ev = strip_ld_preload(envp);
+    char **ev = build_child_envp(envp, argv && argv[0] ? argv[0] : target);
     if (!av || !ev) { free(av); free(ev); return 0; }
 
     av[0] = (char *)*launcher;
@@ -135,6 +193,25 @@ int execvp(const char *file, char *const argv[]) {
     if (reroute(file, argv, environ, &l, &av, &ev))
         return run_rerouted(l, av, ev);
     return real(file, argv);
+}
+
+int execvpe(const char *file, char *const argv[], char *const envp[]) {
+    if (is_launcher(file, getenv("BIONILUX_BINARY_PATH"))) {
+        char **clean = strip_ld_preload(envp);
+        int r = real_execve(file, argv, clean ? clean : envp);
+        int e = errno; free(clean); errno = e;
+        return r;
+    }
+    const char *l; char **av, **ev;
+    if (reroute(file, argv, envp, &l, &av, &ev))
+        return run_rerouted(l, av, ev);
+
+    typedef int (*fn_t)(const char *, char *const[], char *const[]);
+    static fn_t real;
+    REAL(real, "execvpe");
+    if (real) return real(file, argv, envp);
+    errno = ENOSYS;
+    return -1;
 }
 
 // va_list -> argv. Pointer so the caller's position advances on aarch64
